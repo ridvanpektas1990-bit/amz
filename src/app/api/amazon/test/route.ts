@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs";        // zwingt Node (nicht Edge)
+export const runtime = "nodejs";        // Node-Runtime (nicht Edge)
 export const dynamic = "force-dynamic"; // immer serverseitig ausführen
 
 // --- Helpers ---
@@ -20,9 +20,8 @@ function supa() {
   );
 }
 
-/* eslint-disable @typescript-eslint/no-var-requires */
-// Die Typings von 'amazon-sp-api' exportieren keinen konstruierbaren Default.
-// Wir nutzen deshalb require + einen schmalen Konstruktor-Typ.
+// Die Typings von 'amazon-sp-api' sind nicht als konstruierbarer Default exportiert.
+// Wir nutzen require + einen schmalen Konstruktor-Typ und deaktivieren NUR diese eine Lint-Regel.
 type SPClient = {
   callAPI(args: {
     endpoint: string;
@@ -32,9 +31,10 @@ type SPClient = {
     body?: unknown;
   }): Promise<unknown>;
 };
-type SPConstructor = new (opts: Record<string, string>) => SPClient;
+type SPConstructor = new (opts: Record<string, unknown>) => SPClient;
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const SellingPartner = require("amazon-sp-api") as unknown as SPConstructor;
-/* eslint-enable @typescript-eslint/no-var-requires */
 
 // GET /api/amazon/test
 export async function GET() {
@@ -69,7 +69,7 @@ export async function GET() {
     const sp = new SellingPartner({
       region: "eu",
       refresh_token: row.refresh_token,
-      credentials: credentials as unknown as Record<string, string>, // enger Cast umgehen
+      credentials: credentials as unknown as Record<string, string>,
     });
 
     // 4) Sanfter Test-Call
