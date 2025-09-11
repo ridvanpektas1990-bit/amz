@@ -1,12 +1,11 @@
 // src/app/api/amazon/test/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import SellingPartner from "amazon-sp-api";
 
-export const runtime = "nodejs";        // kein Edge, da AWS-SigV4 & Node-Modules
+export const runtime = "nodejs";        // zwingt Node (nicht Edge)
 export const dynamic = "force-dynamic"; // immer serverseitig ausführen
 
-// --- kleine Helfer ---
+// --- Helpers ---
 function must(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env ${name}`);
@@ -21,10 +20,26 @@ function supa() {
   );
 }
 
+/* eslint-disable @typescript-eslint/no-var-requires */
+// Die Typings von 'amazon-sp-api' exportieren keinen konstruierbaren Default.
+// Wir nutzen deshalb require + einen schmalen Konstruktor-Typ.
+type SPClient = {
+  callAPI(args: {
+    endpoint: string;
+    operation: string;
+    path?: string;
+    query?: Record<string, unknown>;
+    body?: unknown;
+  }): Promise<unknown>;
+};
+type SPConstructor = new (opts: Record<string, string>) => SPClient;
+const SellingPartner = require("amazon-sp-api") as unknown as SPConstructor;
+/* eslint-enable @typescript-eslint/no-var-requires */
+
 // GET /api/amazon/test
 export async function GET() {
   try {
-    // 1) Refresh-Token (EU) aus DB laden
+    // 1) Refresh-Token (EU) aus DB holen
     const { data: row, error } = await supa()
       .from("amazon_connections")
       .select("id, refresh_token, region")
@@ -41,23 +56,23 @@ export async function GET() {
       );
     }
 
-    // 2) SP-API Client erstellen
+    // 2) Credentials zusammenstellen
     const credentials = {
       SELLING_PARTNER_APP_CLIENT_ID: must("LWA_CLIENT_ID"),
       SELLING_PARTNER_APP_CLIENT_SECRET: must("LWA_CLIENT_SECRET"),
       AWS_ACCESS_KEY_ID: must("AWS_ACCESS_KEY_ID"),
       AWS_SECRET_ACCESS_KEY: must("AWS_SECRET_ACCESS_KEY"),
       AWS_SELLING_PARTNER_ROLE: must("AWS_SELLING_PARTNER_ROLE_ARN"),
-    } satisfies Record<string, string>;
+    } as const;
 
+    // 3) SP-API Client erzeugen
     const sp = new SellingPartner({
       region: "eu",
       refresh_token: row.refresh_token,
-      // Typen der Lib sind enger; Cast verhindert TS-Fehler ohne "any".
-      credentials: credentials as unknown as Record<string, string>,
+      credentials: credentials as unknown as Record<string, string>, // enger Cast umgehen
     });
 
-    // 3) Sanfter Test-Call
+    // 4) Sanfter Test-Call
     const marketplaces = await sp.callAPI({
       endpoint: "sellers",
       operation: "getMarketplaceParticipations",
