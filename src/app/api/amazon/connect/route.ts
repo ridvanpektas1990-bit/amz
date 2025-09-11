@@ -1,32 +1,41 @@
-import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
+import { NextResponse } from "next/server";
+import crypto from "node:crypto";
 
-const CONSENT_BASE = {
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function must(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env ${name}`);
+  return v;
+}
+
+const REGION_HOST: Record<string, string> = {
   eu: "https://sellercentral-europe.amazon.com",
   na: "https://sellercentral.amazon.com",
   fe: "https://sellercentral.amazon.co.jp",
-} as const;
+};
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const region = (searchParams.get("region") ?? "eu") as keyof typeof CONSENT_BASE;
+export async function GET() {
+  const appId = must("AMAZON_APP_ID");
+  const redirectUri = must("AMAZON_REDIRECT_URI");
+  const region = (process.env.NEXT_PUBLIC_DEFAULT_REGION ?? "eu").toLowerCase();
+  const host = REGION_HOST[region] ?? REGION_HOST.eu;
 
-  const state = crypto.randomBytes(16).toString("hex"); // CSRF
-  const consentUrl = new URL("/apps/authorize/consent", CONSENT_BASE[region]);
-  consentUrl.searchParams.set("application_id", process.env.AMAZON_APP_ID!);
-  consentUrl.searchParams.set("state", state);
-  consentUrl.searchParams.set("redirect_uri", process.env.AMAZON_REDIRECT_URI!);
+  const state = crypto.randomBytes(16).toString("hex");
+  const url = new URL(`${host}/apps/authorize/consent`);
+  url.searchParams.set("application_id", appId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("state", state);
 
-  const res = NextResponse.redirect(consentUrl.toString(), { status: 302 });
-  // State im Cookie merken
+  const res = NextResponse.redirect(url.toString(), 302);
+  // sicheres State-Cookie setzen
   res.cookies.set("amz_state", state, {
     httpOnly: true,
+    secure: true,
     sameSite: "lax",
-    secure: false, // lokal ok; in Prod: true
     path: "/",
-    maxAge: 60 * 10,
+    maxAge: 10 * 60, // 10 min
   });
-  // Region auch merken
-  res.cookies.set("amz_region", region, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 60 * 10 });
   return res;
 }
