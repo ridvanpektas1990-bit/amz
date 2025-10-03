@@ -1,4 +1,4 @@
-export default function ConnectPage() {
+/*export default function ConnectPage() {
   const region = process.env.NEXT_PUBLIC_DEFAULT_REGION ?? "eu";
   return (
     <main className="p-8">
@@ -11,4 +11,8 @@ export default function ConnectPage() {
       </a>
     </main>
   );
-}
+}*/
+
+
+import { redirect } from "next/navigation";
+export default function Page() { redirect("/dashboard"); }

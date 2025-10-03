@@ -20,16 +20,20 @@ function supa() {
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const code = url.searchParams.get("spapi_oauth_code");
-    const sellerId = url.searchParams.get("selling_partner_id");
+    const code = url.searchParams.get("spapi_oauth_code");           // Authorization Code
+    const sellerId = url.searchParams.get("selling_partner_id");     // optional, aber oft vorhanden
     const returnedState = url.searchParams.get("state");
     const cookieState = req.cookies.get("amz_state")?.value;
 
     if (!code) return NextResponse.json({ ok: false, error: "Missing spapi_oauth_code" }, { status: 400 });
-    if (!returnedState || !cookieState || returnedState !== cookieState)
+    if (!returnedState || !cookieState || returnedState !== cookieState) {
       return NextResponse.json({ ok: false, error: "Invalid state" }, { status: 400 });
+    }
 
-    const redirectUri = must("AMAZON_REDIRECT_URI");
+    // Deine .env nutzt REDIRECT_URI (nicht AMAZON_REDIRECT_URI)
+    const redirectUri = must("REDIRECT_URI");
+
+    // LWA: Code -> Tokens
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -58,7 +62,6 @@ export async function GET(req: NextRequest) {
       refresh_token: tokens.refresh_token,
     };
 
-    // upsert nach seller_id+region (falls seller_id fehlt, legen wir trotzdem einen Datensatz an)
     const { error } = await sb
       .from("amazon_connections")
       .upsert(payload, { onConflict: "seller_id,region", ignoreDuplicates: false });
@@ -67,10 +70,16 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "DB upsert failed", detail: error.message }, { status: 500 });
     }
 
-    // State-Cookie löschen
-    const res = NextResponse.json({ ok: true, seller_id: sellerId ?? null });
+    // State-Cookie löschen + UX: ab ins Dashboard
+    const res = NextResponse.redirect(new URL("/dashboard?auth=ok", url));
     res.cookies.set("amz_state", "", { path: "/", maxAge: 0 });
     return res;
+
+    // Wenn du lieber JSON zurückgeben willst, ersetze den Block oben durch:
+    // const res = NextResponse.json({ ok: true, seller_id: sellerId ?? null });
+    // res.cookies.set("amz_state", "", { path: "/", maxAge: 0 });
+    // return res;
+
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
