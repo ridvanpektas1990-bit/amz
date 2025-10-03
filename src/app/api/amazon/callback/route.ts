@@ -53,6 +53,14 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "Token exchange failed", detail: tokens }, { status: 400 });
     }
 
+
+    if (!sellerId) {
+      const res = NextResponse.redirect(new URL('/connect?auth=error&msg=missing_seller_id', url));
+      res.cookies.set('amz_state', '', { path: '/', maxAge: 0 });
+      return res;
+    }
+
+
     // In Supabase speichern (upsert auf seller_id+region)
     const region = (process.env.NEXT_PUBLIC_DEFAULT_REGION ?? "eu").toLowerCase();
     const sb = supa();
