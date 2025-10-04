@@ -1,35 +1,31 @@
-name: Monthly ETL (Fees + Orders)
+name: Monthly ETL
 
 on:
   schedule:
-    - cron: "15 2 3 * *"   # jeden Monat am 3. um 02:15 UTC
+    - cron: "15 2 3 * *"   # am 3. des Monats, 02:15 UTC
   workflow_dispatch: {}
 
 jobs:
   fees:
     runs-on: ubuntu-latest
     env:
-      # ---- Vars (Repo → Settings → Variables) ----
-      TENANT_ID:         ${{ vars.TENANT_ID }}
-      SELLER_ID:         ${{ vars.SELLER_ID }}
+      CODE_DIR: Python/libs/finance
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      SELLER_ID: ${{ vars.SELLER_ID }}
       MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
-
-      # ---- Secrets (Repo → Settings → Secrets) ----
-      SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}                 # optional; Fallback = SERVICE_ROLE
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # LWA / SP-API (mind. eins von LWA_APP_ID, LWA_CLIENT_ID, AMAZON_APP_ID)
-      LWA_APP_ID:        ${{ secrets.LWA_APP_ID }}
-      LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
-      AMAZON_APP_ID:     ${{ secrets.AMAZON_APP_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }} # Fees nutzt diesen Key
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} # Fallback erlaubt
+      LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+      LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }} # optionaler Fallback
+      AMAZON_APP_ID: ${{ secrets.AMAZON_APP_ID }} # optionaler Fallback
       LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -40,93 +36,113 @@ jobs:
         run: |
           set -e
           python - << 'PY'
-          import os, json, sys, pathlib
+          import os, json, sys, re, pathlib
           GITHUB_ENV = os.environ["GITHUB_ENV"]
-
           def exp(k,v):
               with open(GITHUB_ENV,"a") as f: f.write(f"{k}={v}\n")
-              print(f"export {k} = ****")
+              print(f"export {k}=***")
 
-          # --- LWA_APP_ID Fallback ---
+          # LWA_APP_ID Fallbacks
           lwa = os.getenv("LWA_APP_ID") or os.getenv("LWA_CLIENT_ID") or os.getenv("AMAZON_APP_ID")
           if not lwa:
-              print("ERROR: provide one of LWA_APP_ID or LWA_CLIENT_ID or AMAZON_APP_ID")
-              sys.exit(1)
+              print("ERROR: need LWA_APP_ID (or LWA_CLIENT_ID / AMAZON_APP_ID)"); sys.exit(1)
           exp("LWA_APP_ID", lwa)
 
-          # --- Supabase: prefer SUPABASE_KEY; else SERVICE_ROLE ---
+          # Supabase Key (Fees bevorzugt SUPABASE_KEY)
           sb_url = os.getenv("SUPABASE_URL")
           sb_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
           if not (sb_url and sb_key):
-              print("ERROR: SUPABASE_URL and one of SUPABASE_KEY / SUPABASE_SERVICE_ROLE_KEY are required")
-              sys.exit(1)
-          exp("SUPABASE_KEY", sb_key)  # Fees-Script nutzt SUPABASE_KEY
+              print("ERROR: SUPABASE_URL and one of SUPABASE_KEY / SUPABASE_SERVICE_ROLE_KEY required"); sys.exit(1)
+          exp("SUPABASE_KEY", sb_key)
 
-          # --- Tenant fallback ---
+          # Tenant Fallback
           tenant = (os.getenv("TENANT_ID") or os.getenv("SELLER_ID") or "default").strip()
           exp("TENANT_ID", tenant)
 
-          # --- MARKETPLACES_JSON validate (default ["DE"]) ---
-          mps = os.getenv("MARKETPLACES_JSON") or '["DE"]'
-          try:
-              arr = json.loads(mps); assert isinstance(arr, list) and all(isinstance(x,str) for x in arr)
-          except Exception as e:
-              print('ERROR: MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("detail:", e); sys.exit(1)
+          # MARKETPLACES_JSON tolerant
+          raw = os.getenv("MARKETPLACES_JSON","")
+          if not raw:
+              arr = ["DE"]
+          else:
+              try:
+                  val = json.loads(raw)
+              except Exception:
+                  val = raw
+              if isinstance(val, str):
+                  s = val.strip().strip('"').strip("'")
+                  parts = [p.strip() for p in re.split(r'[,\s]+', s) if p.strip()]
+                  arr = [p.upper() for p in parts] or ["DE"]
+              elif isinstance(val, list):
+                  arr = [str(x).strip().upper() for x in val if str(x).strip()] or ["DE"]
+              else:
+                  print('ERROR: MARKETPLACES_JSON must be like DE or ["DE","FR"]'); sys.exit(1)
+          exp("MARKETPLACES_JSON", json.dumps(arr))
 
-          # --- other required secrets ---
-          for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN"]:
+          # Required secrets
+          for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN","SUPABASE_URL"]:
               if not os.getenv(k): print(f"ERROR: missing {k}") or sys.exit(1)
+
+          # Code dir exists?
+          cdir = os.getenv("CODE_DIR","")
+          if not cdir or not pathlib.Path(cdir).is_dir():
+              print(f"ERROR: CODE_DIR '{cdir}' not found in repo"); sys.exit(1)
 
           print("Config (fees) normalized ✓")
           PY
 
-      - name: Compute period (last month)
-        id: period
-        run: |
-          y=$(date -u -d "$(date +%Y-%m-01) -1 month" +%Y)
-          m=$(date -u -d "$(date +%Y-%m-01) -1 month" +%m)
-          echo "year=$y"  >> "$GITHUB_OUTPUT"
-          echo "month=$m" >> "$GITHUB_OUTPUT"
-          echo "Period: $y-$m"
-
-      - name: Run Fees for all marketplaces
-        working-directory: libs/finance
-        env:
-          ORDERS_YEAR:  ${{ steps.period.outputs.year }}
-          ORDERS_MONTH: ${{ steps.period.outputs.month }}
+      - name: Show repo layout
         run: |
           set -e
-          MP_LIST=$(python - <<'PY'
-          import os, json; print("\n".join(json.loads(os.environ.get("MARKETPLACES_JSON",'["DE"]'))))
+          echo "PWD=$(pwd)"
+          ls -la
+          echo "----"
+          ls -la "$CODE_DIR"
+
+      - name: Run Fees (last month) for each marketplace
+        working-directory: ${{ env.CODE_DIR }}
+        env:
+          LOCAL_TZ: "Europe/Berlin"
+        run: |
+          set -e
+          # Vormonat bestimmen (UTC, unabhängig vom Runner-TZ)
+          LM_YEAR=$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y)
+          LM_MONTH=$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%-m)
+          echo "Period: ${LM_YEAR}-${LM_MONTH}"
+
+          MPS=$(python - <<'PY'
+          import os, json; print(" ".join(json.loads(os.environ["MARKETPLACES_JSON"])))
           PY
           )
-          for MP in $MP_LIST; do
-            echo "➡️ Fees for marketplace ${MP} (${ORDERS_YEAR}-${ORDERS_MONTH})"
-            MARKETPLACE="$MP" python AmzT_Fee.py
+
+          for MP in $MPS; do
+            echo "=== Fees → $MP ==="
+            export MARKETPLACE="$MP"
+            export ORDERS_YEAR="$LM_YEAR"
+            export ORDERS_MONTH="$LM_MONTH"
+            python AmzT_Fee.py
           done
 
   orders:
     runs-on: ubuntu-latest
     needs: fees
     env:
-      TENANT_ID:         ${{ vars.TENANT_ID }}
-      SELLER_ID:         ${{ vars.SELLER_ID }}
+      CODE_DIR: Python/libs/finance
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      SELLER_ID: ${{ vars.SELLER_ID }}
       MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
-
-      SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}  # optional; Fallback = SUPABASE_KEY
-      SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
-
-      LWA_APP_ID:        ${{ secrets.LWA_APP_ID }}
-      LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
-      AMAZON_APP_ID:     ${{ secrets.AMAZON_APP_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }} # Fallback erlaubt
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} # Orders bevorzugt diesen Key
+      LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+      LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
+      AMAZON_APP_ID: ${{ secrets.AMAZON_APP_ID }}
       LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -137,63 +153,89 @@ jobs:
         run: |
           set -e
           python - << 'PY'
-          import os, json, sys
+          import os, json, sys, re, pathlib
           GITHUB_ENV = os.environ["GITHUB_ENV"]
           def exp(k,v):
               with open(GITHUB_ENV,"a") as f: f.write(f"{k}={v}\n")
-              print(f"export {k} = ****")
+              print(f"export {k}=***")
 
-          # LWA_APP_ID fallback
+          # LWA_APP_ID Fallbacks
           lwa = os.getenv("LWA_APP_ID") or os.getenv("LWA_CLIENT_ID") or os.getenv("AMAZON_APP_ID")
-          if not lwa: print("ERROR: need LWA_APP_ID/LWA_CLIENT_ID/AMAZON_APP_ID") or sys.exit(1)
+          if not lwa:
+              print("ERROR: need LWA_APP_ID (or LWA_CLIENT_ID / AMAZON_APP_ID)"); sys.exit(1)
           exp("LWA_APP_ID", lwa)
 
-          # Supabase: prefer SERVICE_ROLE for Orders; else fall back to SUPABASE_KEY
+          # Orders: SERVICE_ROLE bevorzugt (sonst SUPABASE_KEY)
           sb_url = os.getenv("SUPABASE_URL")
           srv = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
           if not (sb_url and srv):
-              print("ERROR: SUPABASE_URL and one of SUPABASE_SERVICE_ROLE_KEY / SUPABASE_KEY are required")
-              sys.exit(1)
+              print("ERROR: SUPABASE_URL and one of SUPABASE_SERVICE_ROLE_KEY / SUPABASE_KEY required"); sys.exit(1)
           exp("SUPABASE_SERVICE_ROLE_KEY", srv)
 
+          # Tenant fallback
           tenant = (os.getenv("TENANT_ID") or os.getenv("SELLER_ID") or "default").strip()
           exp("TENANT_ID", tenant)
 
-          mps = os.getenv("MARKETPLACES_JSON") or '["DE"]'
-          try:
-              arr = json.loads(mps); assert isinstance(arr, list) and all(isinstance(x,str) for x in arr)
-          except Exception as e:
-              print('ERROR: MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("detail:", e); sys.exit(1)
+          # MARKETPLACES_JSON tolerant
+          raw = os.getenv("MARKETPLACES_JSON","")
+          if not raw:
+              arr = ["DE"]
+          else:
+              try:
+                  val = json.loads(raw)
+              except Exception:
+                  val = raw
+              if isinstance(val, str):
+                  import re
+                  s = val.strip().strip('"').strip("'")
+                  parts = [p.strip() for p in re.split(r'[,\s]+', s) if p.strip()]
+                  arr = [p.upper() for p in parts] or ["DE"]
+              elif isinstance(val, list):
+                  arr = [str(x).strip().upper() for x in val if str(x).strip()] or ["DE"]
+              else:
+                  print('ERROR: MARKETPLACES_JSON must be like DE or ["DE","FR"]'); sys.exit(1)
+          exp("MARKETPLACES_JSON", json.dumps(arr))
 
-          for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN"]:
+          # Required secrets
+          for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN","SUPABASE_URL"]:
               if not os.getenv(k): print(f"ERROR: missing {k}") or sys.exit(1)
+
+          # Code dir exists?
+          cdir = os.getenv("CODE_DIR","")
+          if not cdir or not pathlib.Path(cdir).is_dir():
+              print(f"ERROR: CODE_DIR '{cdir}' not found in repo"); sys.exit(1)
 
           print("Config (orders) normalized ✓")
           PY
 
-      - name: Compute period (last month)
-        id: period
+      - name: Show repo layout
         run: |
-          y=$(date -u -d "$(date +%Y-%m-01) -1 month" +%Y)
-          m=$(date -u -d "$(date +%Y-%m-01) -1 month" +%m)
-          echo "year=$y"  >> "$GITHUB_OUTPUT"
-          echo "month=$m" >> "$GITHUB_OUTPUT"
-          echo "Period: $y-$m"
+          set -e
+          echo "PWD=$(pwd)"
+          ls -la
+          echo "----"
+          ls -la "$CODE_DIR"
 
-      - name: Run Orders for all marketplaces
-        working-directory: libs/finance
+      - name: Run Orders (last month) for each marketplace
+        working-directory: ${{ env.CODE_DIR }}
         env:
           WRITE_CSV: "0"
           ORDERS_DATE_MODE: "created"
-          ORDERS_YEAR:  ${{ steps.period.outputs.year }}
-          ORDERS_MONTH: ${{ steps.period.outputs.month }}
         run: |
           set -e
-          MP_LIST=$(python - <<'PY'
-          import os, json; print("\n".join(json.loads(os.environ.get("MARKETPLACES_JSON",'["DE"]'))))
+          LM_YEAR=$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y)
+          LM_MONTH=$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%-m)
+          echo "Period: ${LM_YEAR}-${LM_MONTH}"
+
+          MPS=$(python - <<'PY'
+          import os, json; print(" ".join(json.loads(os.environ["MARKETPLACES_JSON"])))
           PY
           )
-          for MP in $MP_LIST; do
-            echo "➡️ Orders for marketplace ${MP} (${ORDERS_YEAR}-${ORDERS_MONTH})"
-            MARKETPLACE="$MP" python AmzT_Sales.py
+
+          for MP in $MPS; do
+            echo "=== Orders → $MP ==="
+            export MARKETPLACE="$MP"
+            export ORDERS_YEAR="$LM_YEAR"
+            export ORDERS_MONTH="$LM_MONTH"
+            python AmzT_Sales.py
           done
