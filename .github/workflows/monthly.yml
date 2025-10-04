@@ -1,24 +1,28 @@
-name: Monthly ETL
+name: Monthly ETL (Fees + Orders)
 
 on:
   schedule:
-    - cron: "15 2 3 * *"   # UTC
+    - cron: "15 2 3 * *"   # jeden Monat am 3. um 02:15 UTC
   workflow_dispatch: {}
 
 jobs:
   fees:
     runs-on: ubuntu-latest
     env:
+      # Repo/Org VARs
       TENANT_ID: ${{ vars.TENANT_ID }}
       SELLER_ID: ${{ vars.SELLER_ID }}
       MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
+      # Secrets
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}           # Fees nutzt "SUPABASE_KEY"
       LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
       LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -28,56 +32,72 @@ jobs:
           python -m pip install -U pip
           pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
 
-      # ⬇️ Hier einfügen: Validate config (VOR dem Python-Run)
-      - name: Validate config
+      - name: Validate config (fees)
         run: |
           set -e
           python - << 'PY'
           import os, json, sys
           required = [
-            "SUPABASE_URL","LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN",
+            "SUPABASE_URL","SUPABASE_KEY",
+            "LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN",
             "TENANT_ID","MARKETPLACES_JSON"
           ]
           missing = [k for k in required if not os.getenv(k)]
-          if not os.getenv("SUPABASE_KEY") and not os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
-              print("At least one of SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY must be provided")
-              sys.exit(1)
           if missing:
               print("Missing env:", missing); sys.exit(1)
           try:
               mps = json.loads(os.environ["MARKETPLACES_JSON"])
-              assert isinstance(mps, list) and all(isinstance(x, str) for x in mps)
+              assert isinstance(mps, list) and all(isinstance(x,str) for x in mps)
           except Exception as e:
-              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]')
-              print("Error:", e); sys.exit(1)
-          print("Config looks good ✓")
+              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("Error:", e); sys.exit(1)
+          print("Config (fees) OK ✓")
           PY
 
-      - name: Run Fees
+      - name: Compute period (last month)
+        id: period
+        run: |
+          y=$(date -u -d "$(date +%Y-%m-01) -1 month" +%Y)
+          m=$(date -u -d "$(date +%Y-%m-01) -1 month" +%m)
+          echo "year=$y"  >> "$GITHUB_OUTPUT"
+          echo "month=$m" >> "$GITHUB_OUTPUT"
+          echo "Period: $y-$m"
+
+      - name: Run Fees for all marketplaces
         working-directory: libs/finance
         env:
-          # Monat/Jahr optional – default: Vormonat aus deinem Script
-          ORDERS_YEAR: ""
-          ORDERS_MONTH: ""
+          ORDERS_YEAR:  ${{ steps.period.outputs.year }}
+          ORDERS_MONTH: ${{ steps.period.outputs.month }}
         run: |
-          # Beispiel: nur DE (oder in einer Schleife über MARKETPLACES_JSON)
-          export MARKETPLACE=DE
-          python AmzT_Fee.py
+          set -e
+          # Liste der Marketplaces aus JSON holen
+          MP_LIST=$(python - <<'PY'
+          import os, json
+          print("\n".join(json.loads(os.environ["MARKETPLACES_JSON"])))
+          PY
+          )
+          for MP in $MP_LIST; do
+            echo "➡️ Fees for marketplace ${MP} (${ORDERS_YEAR}-${ORDERS_MONTH})"
+            MARKETPLACE="$MP" python AmzT_Fee.py
+          done
 
   orders:
     runs-on: ubuntu-latest
     needs: fees
     env:
+      # Repo/Org VARs
       TENANT_ID: ${{ vars.TENANT_ID }}
       SELLER_ID: ${{ vars.SELLER_ID }}
       MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
+      # Secrets
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}  # Orders nutzt "SERVICE_ROLE"
       LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
       LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -87,36 +107,51 @@ jobs:
           python -m pip install -U pip
           pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
 
-      # ⬇️ Hier wieder einfügen (vor dem Orders-Run)
-      - name: Validate config
+      - name: Validate config (orders)
         run: |
           set -e
           python - << 'PY'
           import os, json, sys
           required = [
-            "SUPABASE_URL","LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN",
+            "SUPABASE_URL","SUPABASE_SERVICE_ROLE_KEY",
+            "LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN",
             "TENANT_ID","MARKETPLACES_JSON"
           ]
           missing = [k for k in required if not os.getenv(k)]
-          if not os.getenv("SUPABASE_KEY") and not os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
-              print("At least one of SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY must be provided")
-              sys.exit(1)
           if missing:
               print("Missing env:", missing); sys.exit(1)
           try:
               mps = json.loads(os.environ["MARKETPLACES_JSON"])
-              assert isinstance(mps, list) and all(isinstance(x, str) for x in mps)
+              assert isinstance(mps, list) and all(isinstance(x,str) for x in mps)
           except Exception as e:
-              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]')
-              print("Error:", e); sys.exit(1)
-          print("Config looks good ✓")
+              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("Error:", e); sys.exit(1)
+          print("Config (orders) OK ✓")
           PY
 
-      - name: Run Orders
+      - name: Compute period (last month)
+        id: period
+        run: |
+          y=$(date -u -d "$(date +%Y-%m-01) -1 month" +%Y)
+          m=$(date -u -d "$(date +%Y-%m-01) -1 month" +%m)
+          echo "year=$y"  >> "$GITHUB_OUTPUT"
+          echo "month=$m" >> "$GITHUB_OUTPUT"
+          echo "Period: $y-$m"
+
+      - name: Run Orders for all marketplaces
         working-directory: libs/finance
         env:
           WRITE_CSV: "0"
-          ORDERS_DATE_MODE: "created"
+          ORDERS_DATE_MODE: "created"   # oder "updated"
+          ORDERS_YEAR:  ${{ steps.period.outputs.year }}
+          ORDERS_MONTH: ${{ steps.period.outputs.month }}
         run: |
-          export MARKETPLACE=DE
-          python AmzT_Sales.py
+          set -e
+          MP_LIST=$(python - <<'PY'
+          import os, json
+          print("\n".join(json.loads(os.environ["MARKETPLACES_JSON"])))
+          PY
+          )
+          for MP in $MP_LIST; do
+            echo "➡️ Orders for marketplace ${MP} (${ORDERS_YEAR}-${ORDERS_MONTH})"
+            MARKETPLACE="$MP" python AmzT_Sales.py
+          done
