@@ -1,1 +1,27 @@
+name: Amazon Fees ETL
+
+on:
+  schedule:
+    - cron: "35 3 3 * *" # jeden Monat am 3. um 03:35 UTC
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
+      - name: Run last month for multiple marketplaces
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          LOCAL_TZ: "Europe/Berlin"
+          MARKETPLACES: "DE,FR,IT"   # anpassen
+        run: python runner_last_month.py
 
