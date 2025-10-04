@@ -12,24 +12,30 @@ jobs:
       TENANT_ID: ${{ vars.TENANT_ID }}
       SELLER_ID: ${{ vars.SELLER_ID }}
       MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
+      CODE_DIR: ${{ vars.CODE_DIR }}              # optional override
+      FEE_SCRIPT: ${{ vars.FEE_SCRIPT }}          # optional override, default AmzT_Fee.py
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}                      # Fees bevorzugt diesen Key
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}   # bevorzugt für Fees
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} # Fallback
       LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
-      LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}                    # Fallback-Name
-      AMAZON_APP_ID: ${{ secrets.AMAZON_APP_ID }}                    # Fallback-Name
+      LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }} # Fallback-Name
+      AMAZON_APP_ID: ${{ secrets.AMAZON_APP_ID }} # Fallback-Name
       LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
       - name: Install dependencies
         run: |
           python -m pip install -U pip
           pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
+
+      - name: Show repo (top)
+        run: |
+          echo "PWD=$(pwd)"
+          find . -maxdepth 4 -type f | sed -n '1,400p'
 
       - name: Normalize, autodetect CODE_DIR & validate (fees)
         run: |
@@ -37,31 +43,27 @@ jobs:
           python - << 'PY'
           import os, json, sys, re, pathlib
           root = pathlib.Path(".").resolve()
-
-          # ---- helper to export to job env
           env_file = os.environ["GITHUB_ENV"]
           def exp(k,v):
               with open(env_file,"a") as f: f.write(f"{k}={v}\n")
-              print(f"export {k}={v if k=='CODE_DIR' else '***'}")
+              print(f"export {k}={v if k in ('CODE_DIR','FEE_SCRIPT','MARKETPLACES_JSON') else '***'}")
 
           # ---- normalize LWA_APP_ID
           lwa = os.getenv("LWA_APP_ID") or os.getenv("LWA_CLIENT_ID") or os.getenv("AMAZON_APP_ID")
-          if not lwa:
-              print("ERROR: need LWA_APP_ID (or LWA_CLIENT_ID / AMAZON_APP_ID)"); sys.exit(1)
+          if not lwa: print("ERROR: need LWA_APP_ID/LWA_CLIENT_ID/AMAZON_APP_ID"); sys.exit(1)
           exp("LWA_APP_ID", lwa)
 
-          # ---- supabase key (fees: SUPABASE_KEY preferred)
+          # ---- supabase key (fees)
           sb_url = os.getenv("SUPABASE_URL")
           sb_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-          if not (sb_url and sb_key):
-              print("ERROR: SUPABASE_URL and one of SUPABASE_KEY / SUPABASE_SERVICE_ROLE_KEY required"); sys.exit(1)
+          if not (sb_url and sb_key): print("ERROR: SUPABASE_URL and one of SUPABASE_KEY/SERVICE_ROLE"); sys.exit(1)
           exp("SUPABASE_KEY", sb_key)
 
-          # ---- tenant fallback
+          # ---- tenant
           tenant = (os.getenv("TENANT_ID") or os.getenv("SELLER_ID") or "default").strip()
           exp("TENANT_ID", tenant)
 
-          # ---- parse MARKETPLACES_JSON tolerant
+          # ---- marketplaces tolerant
           raw = os.getenv("MARKETPLACES_JSON","")
           if not raw:
               arr = ["DE"]
@@ -84,25 +86,29 @@ jobs:
           for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN","SUPABASE_URL"]:
               if not os.getenv(k): print(f"ERROR: missing {k}") or sys.exit(1)
 
-          # ---- autodetect CODE_DIR by locating AmzT_Fee.py / AmzT_Sales.py
-          fee_dirs = {p.parent for p in root.rglob("AmzT_Fee.py")}
-          sales_dirs = {p.parent for p in root.rglob("AmzT_Sales.py")}
-          cand = (fee_dirs & sales_dirs) or fee_dirs or sales_dirs
-          if not cand:
-              print("ERROR: Could not locate AmzT_Fee.py / AmzT_Sales.py in repo"); sys.exit(1)
-          code_dir = sorted(cand, key=lambda p: len(str(p)))[0]  # pick shortest path
-          exp("CODE_DIR", str(code_dir))
-
+          # ---- locate fee script
+          fee_script = os.getenv("FEE_SCRIPT") or "AmzT_Fee.py"
+          code_dir = os.getenv("CODE_DIR")
+          candidates = []
+          cand_names = [fee_script, "AmzT_Fees.py", "orders_month_fees_supabase_parallel.py"]
+          if code_dir:
+              base = root / code_dir
+              for n in cand_names:
+                  p = base / n
+                  if p.exists():
+                      candidates.append(p)
+                      break
+          if not candidates:
+              for n in cand_names:
+                  candidates += list(root.rglob(n))
+          if not candidates:
+              print("ERROR: Could not locate fee script. Looked for:", cand_names)
+              sys.exit(1)
+          pick = sorted(candidates, key=lambda p: len(str(p)))[0]
+          exp("CODE_DIR", str(pick.parent))
+          exp("FEE_SCRIPT", pick.name)
           print("Config (fees) normalized ✓")
           PY
-
-      - name: Show repo & CODE_DIR
-        run: |
-          set -e
-          echo "PWD=$(pwd)"
-          ls -la
-          echo "---- CODE_DIR ----"
-          ls -la "$CODE_DIR"
 
       - name: Run Fees (last month) for each marketplace
         working-directory: ${{ env.CODE_DIR }}
@@ -124,7 +130,7 @@ jobs:
             export MARKETPLACE="$MP"
             export ORDERS_YEAR="$LM_YEAR"
             export ORDERS_MONTH="$LM_MONTH"
-            python AmzT_Fee.py
+            python "$FEE_SCRIPT"
           done
 
   orders:
@@ -134,9 +140,11 @@ jobs:
       TENANT_ID: ${{ vars.TENANT_ID }}
       SELLER_ID: ${{ vars.SELLER_ID }}
       MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
+      CODE_DIR: ${{ vars.CODE_DIR }}                # optional override
+      ORDERS_SCRIPT: ${{ vars.ORDERS_SCRIPT }}      # optional override, default AmzT_Sales.py
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}                      # Fallback
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} # Orders bevorzugt SERVICE ROLE
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}     # Fallback
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }} # bevorzugt für Orders
       LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
       LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
       AMAZON_APP_ID: ${{ secrets.AMAZON_APP_ID }}
@@ -145,8 +153,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
       - name: Install dependencies
         run: |
@@ -162,17 +169,16 @@ jobs:
           env_file = os.environ["GITHUB_ENV"]
           def exp(k,v):
               with open(env_file,"a") as f: f.write(f"{k}={v}\n")
-              print(f"export {k}={v if k=='CODE_DIR' else '***'}")
+              print(f"export {k}={v if k in ('CODE_DIR','ORDERS_SCRIPT','MARKETPLACES_JSON') else '***'}")
 
           lwa = os.getenv("LWA_APP_ID") or os.getenv("LWA_CLIENT_ID") or os.getenv("AMAZON_APP_ID")
-          if not lwa:
-              print("ERROR: need LWA_APP_ID (or LWA_CLIENT_ID / AMAZON_APP_ID)"); sys.exit(1)
+          if not lwa: print("ERROR: need LWA_APP_ID/LWA_CLIENT_ID/AMAZON_APP_ID"); sys.exit(1)
           exp("LWA_APP_ID", lwa)
 
+          # orders → service role bevorzugt
           sb_url = os.getenv("SUPABASE_URL")
           srv = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
-          if not (sb_url and srv):
-              print("ERROR: SUPABASE_URL and one of SUPABASE_SERVICE_ROLE_KEY / SUPABASE_KEY required"); sys.exit(1)
+          if not (sb_url and srv): print("ERROR: SUPABASE_URL and one of SERVICE_ROLE/KEY required"); sys.exit(1)
           exp("SUPABASE_SERVICE_ROLE_KEY", srv)
 
           tenant = (os.getenv("TENANT_ID") or os.getenv("SELLER_ID") or "default").strip()
@@ -199,24 +205,29 @@ jobs:
           for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN","SUPABASE_URL"]:
               if not os.getenv(k): print(f"ERROR: missing {k}") or sys.exit(1)
 
-          fee_dirs = {p.parent for p in root.rglob("AmzT_Fee.py")}
-          sales_dirs = {p.parent for p in root.rglob("AmzT_Sales.py")}
-          cand = (fee_dirs & sales_dirs) or sales_dirs or fee_dirs
-          if not cand:
-              print("ERROR: Could not locate AmzT_Sales.py in repo"); sys.exit(1)
-          code_dir = sorted(cand, key=lambda p: len(str(p)))[0]
-          exp("CODE_DIR", str(code_dir))
-
+          # ---- locate orders script
+          orders_script = os.getenv("ORDERS_SCRIPT") or "AmzT_Sales.py"
+          code_dir = os.getenv("CODE_DIR")
+          candidates = []
+          cand_names = [orders_script, "orders_month_supabase.py", "AmzT_Orders.py"]
+          if code_dir:
+              base = root / code_dir
+              for n in cand_names:
+                  p = base / n
+                  if p.exists():
+                      candidates.append(p)
+                      break
+          if not candidates:
+              for n in cand_names:
+                  candidates += list(root.rglob(n))
+          if not candidates:
+              print("ERROR: Could not locate orders script. Looked for:", cand_names)
+              sys.exit(1)
+          pick = sorted(candidates, key=lambda p: len(str(p)))[0]
+          exp("CODE_DIR", str(pick.parent))
+          exp("ORDERS_SCRIPT", pick.name)
           print("Config (orders) normalized ✓")
           PY
-
-      - name: Show repo & CODE_DIR
-        run: |
-          set -e
-          echo "PWD=$(pwd)"
-          ls -la
-          echo "---- CODE_DIR ----"
-          ls -la "$CODE_DIR"
 
       - name: Run Orders (last month) for each marketplace
         working-directory: ${{ env.CODE_DIR }}
@@ -239,5 +250,5 @@ jobs:
             export MARKETPLACE="$MP"
             export ORDERS_YEAR="$LM_YEAR"
             export ORDERS_MONTH="$LM_MONTH"
-            python AmzT_Sales.py
+            python "$ORDERS_SCRIPT"
           done
