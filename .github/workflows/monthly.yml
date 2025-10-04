@@ -1,0 +1,102 @@
+name: monthly-etl
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "ORDERS_YEAR (optional override)"
+        required: false
+      month:
+        description: "ORDERS_MONTH (1-12, optional override)"
+        required: false
+  schedule:
+    - cron: "15 3 3 * *"  # jeden 3. um 03:15 UTC → verarbeitet den Vormonat
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    # Mehrere Marktplätze? Hinterlege in Repo-Variable MARKETPLACES_JSON z.B. ["DE","FR"]
+    strategy:
+      fail-fast: false
+      matrix:
+        marketplace: ${{ fromJSON(vars.MARKETPLACES_JSON || '["DE"]') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+
+      - name: Compute period (default = last month)
+        id: period
+        env:
+          IN_YEAR: ${{ github.event.inputs.year }}
+          IN_MONTH: ${{ github.event.inputs.month }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import date, timedelta
+          y = os.getenv("IN_YEAR")
+          m = os.getenv("IN_MONTH")
+          if y and m:
+              Y, M = int(y), int(m)
+          else:
+              first = date.today().replace(day=1)
+              lm = first - timedelta(days=1)
+              Y, M = lm.year, lm.month
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              print(f"year={Y}", file=f)
+              print(f"month={M}", file=f)
+          PY
+
+      - name: Run FEES ETL
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}                # reicht, da RLS/Policies vorhanden
+          LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
+          TENANT_ID: ${{ vars.TENANT_ID }}                         # z.B. SELLER_ID
+          MARKETPLACE: ${{ matrix.marketplace }}                   # DE, FR, …
+          ORDERS_YEAR: ${{ steps.period.outputs.year }}
+          ORDERS_MONTH: ${{ steps.period.outputs.month }}
+          LOCAL_TZ: Europe/Berlin
+          FINANCE_PACE_SECONDS: "3.5"
+        run: |
+          python libs/finance/AmzT_Fee.py
+
+      - name: Cooldown (gegen 429)
+        run: sleep 15
+
+      - name: Run ORDERS ETL
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # Für Orders bevorzugt Service-Role, außer deine RLS lässt anon Inserts zu:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
+          TENANT_ID: ${{ vars.TENANT_ID }}            # wenn leer → fällt dein Script auf SELLER_ID/default
+          SELLER_ID: ${{ vars.SELLER_ID }}
+          MARKETPLACE: ${{ matrix.marketplace }}       # DE, FR, …
+          ORDERS_YEAR: ${{ steps.period.outputs.year }}
+          ORDERS_MONTH: ${{ steps.period.outputs.month }}
+          LOCAL_TZ: Europe/Berlin
+          ORDERS_DATE_MODE: created                    # oder "updated"
+          WRITE_CSV: "0"
+          ORDERS_PACE_SECONDS: "2.5"
+        run: |
+          python libs/finance/AmzT_Sales.py
+
+      - name: Upload CSV artifacts (optional)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etl-csvs-${{ steps.period.outputs.year }}-${{ steps.period.outputs.month }}-${{ matrix.marketplace }}
+          path: output/*.csv
+          if-no-files-found: ignore
