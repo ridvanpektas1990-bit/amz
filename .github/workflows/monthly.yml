@@ -9,19 +9,21 @@ jobs:
   fees:
     runs-on: ubuntu-latest
     env:
-      # Vars
-      TENANT_ID:          ${{ vars.TENANT_ID }}
-      SELLER_ID:          ${{ vars.SELLER_ID }}
-      MARKETPLACES_JSON:  ${{ vars.MARKETPLACES_JSON }}
+      # ---- Vars (Repo → Settings → Variables) ----
+      TENANT_ID:         ${{ vars.TENANT_ID }}
+      SELLER_ID:         ${{ vars.SELLER_ID }}
+      MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
 
-      # Supabase
-      SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
-      # Fees nimmt primär SUPABASE_KEY, fällt sonst auf SERVICE_ROLE zurück
-      SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY != '' && secrets.SUPABASE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # ---- Secrets (Repo → Settings → Secrets) ----
+      SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}                 # optional; Fallback = SERVICE_ROLE
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # LWA / SP-API (LWA_APP_ID alias auf LWA_CLIENT_ID/AMAZON_APP_ID)
-      LWA_APP_ID:         ${{ secrets.LWA_APP_ID != '' && secrets.LWA_APP_ID || (secrets.LWA_CLIENT_ID != '' && secrets.LWA_CLIENT_ID || secrets.AMAZON_APP_ID) }}
-      LWA_CLIENT_SECRET:  ${{ secrets.LWA_CLIENT_SECRET }}
+      # LWA / SP-API (mind. eins von LWA_APP_ID, LWA_CLIENT_ID, AMAZON_APP_ID)
+      LWA_APP_ID:        ${{ secrets.LWA_APP_ID }}
+      LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+      AMAZON_APP_ID:     ${{ secrets.AMAZON_APP_ID }}
+      LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
 
     steps:
@@ -34,30 +36,48 @@ jobs:
           python -m pip install -U pip
           pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
 
-      - name: Secrets presence (fees)
-        run: |
-          echo "SUPABASE_URL:         $([ -n "${SUPABASE_URL}" ] && echo set || echo EMPTY)"
-          echo "SUPABASE_KEY:         $([ -n "${SUPABASE_KEY}" ] && echo set || echo EMPTY)"
-          echo "LWA_APP_ID:           $([ -n "${LWA_APP_ID}" ] && echo set || echo EMPTY)"
-          echo "LWA_CLIENT_SECRET:    $([ -n "${LWA_CLIENT_SECRET}" ] && echo set || echo EMPTY)"
-          echo "SP_API_REFRESH_TOKEN: $([ -n "${SP_API_REFRESH_TOKEN}" ] && echo set || echo EMPTY)"
-          echo "TENANT_ID:            $([ -n "${TENANT_ID}" ] && echo set || echo EMPTY)"
-          echo "MARKETPLACES_JSON:    ${MARKETPLACES_JSON}"
-
-      - name: Validate config (fees)
+      - name: Normalize & validate env (fees)
         run: |
           set -e
           python - << 'PY'
-          import os, json, sys
-          req = ["SUPABASE_URL","SUPABASE_KEY","LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN","TENANT_ID","MARKETPLACES_JSON"]
-          miss=[k for k in req if not os.getenv(k)]
-          if miss: print("Missing env:", miss) or sys.exit(1)
+          import os, json, sys, pathlib
+          GITHUB_ENV = os.environ["GITHUB_ENV"]
+
+          def exp(k,v):
+              with open(GITHUB_ENV,"a") as f: f.write(f"{k}={v}\n")
+              print(f"export {k} = ****")
+
+          # --- LWA_APP_ID Fallback ---
+          lwa = os.getenv("LWA_APP_ID") or os.getenv("LWA_CLIENT_ID") or os.getenv("AMAZON_APP_ID")
+          if not lwa:
+              print("ERROR: provide one of LWA_APP_ID or LWA_CLIENT_ID or AMAZON_APP_ID")
+              sys.exit(1)
+          exp("LWA_APP_ID", lwa)
+
+          # --- Supabase: prefer SUPABASE_KEY; else SERVICE_ROLE ---
+          sb_url = os.getenv("SUPABASE_URL")
+          sb_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+          if not (sb_url and sb_key):
+              print("ERROR: SUPABASE_URL and one of SUPABASE_KEY / SUPABASE_SERVICE_ROLE_KEY are required")
+              sys.exit(1)
+          exp("SUPABASE_KEY", sb_key)  # Fees-Script nutzt SUPABASE_KEY
+
+          # --- Tenant fallback ---
+          tenant = (os.getenv("TENANT_ID") or os.getenv("SELLER_ID") or "default").strip()
+          exp("TENANT_ID", tenant)
+
+          # --- MARKETPLACES_JSON validate (default ["DE"]) ---
+          mps = os.getenv("MARKETPLACES_JSON") or '["DE"]'
           try:
-              mps=json.loads(os.environ["MARKETPLACES_JSON"])
-              assert isinstance(mps,list) and all(isinstance(x,str) for x in mps)
+              arr = json.loads(mps); assert isinstance(arr, list) and all(isinstance(x,str) for x in arr)
           except Exception as e:
-              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("Error:", e); sys.exit(1)
-          print("Config (fees) OK ✓")
+              print('ERROR: MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("detail:", e); sys.exit(1)
+
+          # --- other required secrets ---
+          for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN"]:
+              if not os.getenv(k): print(f"ERROR: missing {k}") or sys.exit(1)
+
+          print("Config (fees) normalized ✓")
           PY
 
       - name: Compute period (last month)
@@ -77,7 +97,7 @@ jobs:
         run: |
           set -e
           MP_LIST=$(python - <<'PY'
-          import os, json; print("\n".join(json.loads(os.environ["MARKETPLACES_JSON"])))
+          import os, json; print("\n".join(json.loads(os.environ.get("MARKETPLACES_JSON",'["DE"]'))))
           PY
           )
           for MP in $MP_LIST; do
@@ -89,19 +109,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: fees
     env:
-      # Vars
-      TENANT_ID:          ${{ vars.TENANT_ID }}
-      SELLER_ID:          ${{ vars.SELLER_ID }}
-      MARKETPLACES_JSON:  ${{ vars.MARKETPLACES_JSON }}
+      TENANT_ID:         ${{ vars.TENANT_ID }}
+      SELLER_ID:         ${{ vars.SELLER_ID }}
+      MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
 
-      # Supabase
-      SUPABASE_URL:             ${{ secrets.SUPABASE_URL }}
-      # Orders nimmt primär SERVICE_ROLE, fällt sonst auf normale KEY zurück
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY != '' && secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_KEY }}
+      SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}  # optional; Fallback = SUPABASE_KEY
+      SUPABASE_KEY:      ${{ secrets.SUPABASE_KEY }}
 
-      # LWA / SP-API (gleicher Alias)
-      LWA_APP_ID:         ${{ secrets.LWA_APP_ID != '' && secrets.LWA_APP_ID || (secrets.LWA_CLIENT_ID != '' && secrets.LWA_CLIENT_ID || secrets.AMAZON_APP_ID) }}
-      LWA_CLIENT_SECRET:  ${{ secrets.LWA_CLIENT_SECRET }}
+      LWA_APP_ID:        ${{ secrets.LWA_APP_ID }}
+      LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+      AMAZON_APP_ID:     ${{ secrets.AMAZON_APP_ID }}
+      LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
       SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
 
     steps:
@@ -114,30 +133,42 @@ jobs:
           python -m pip install -U pip
           pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
 
-      - name: Secrets presence (orders)
-        run: |
-          echo "SUPABASE_URL:               $([ -n "${SUPABASE_URL}" ] && echo set || echo EMPTY)"
-          echo "SUPABASE_SERVICE_ROLE_KEY:  $([ -n "${SUPABASE_SERVICE_ROLE_KEY}" ] && echo set || echo EMPTY)"
-          echo "LWA_APP_ID:                 $([ -n "${LWA_APP_ID}" ] && echo set || echo EMPTY)"
-          echo "LWA_CLIENT_SECRET:          $([ -n "${LWA_CLIENT_SECRET}" ] && echo set || echo EMPTY)"
-          echo "SP_API_REFRESH_TOKEN:       $([ -n "${SP_API_REFRESH_TOKEN}" ] && echo set || echo EMPTY)"
-          echo "TENANT_ID:                  $([ -n "${TENANT_ID}" ] && echo set || echo EMPTY)"
-          echo "MARKETPLACES_JSON:          ${MARKETPLACES_JSON}"
-
-      - name: Validate config (orders)
+      - name: Normalize & validate env (orders)
         run: |
           set -e
           python - << 'PY'
           import os, json, sys
-          req = ["SUPABASE_URL","SUPABASE_SERVICE_ROLE_KEY","LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN","TENANT_ID","MARKETPLACES_JSON"]
-          miss=[k for k in req if not os.getenv(k)]
-          if miss: print("Missing env:", miss) or sys.exit(1)
+          GITHUB_ENV = os.environ["GITHUB_ENV"]
+          def exp(k,v):
+              with open(GITHUB_ENV,"a") as f: f.write(f"{k}={v}\n")
+              print(f"export {k} = ****")
+
+          # LWA_APP_ID fallback
+          lwa = os.getenv("LWA_APP_ID") or os.getenv("LWA_CLIENT_ID") or os.getenv("AMAZON_APP_ID")
+          if not lwa: print("ERROR: need LWA_APP_ID/LWA_CLIENT_ID/AMAZON_APP_ID") or sys.exit(1)
+          exp("LWA_APP_ID", lwa)
+
+          # Supabase: prefer SERVICE_ROLE for Orders; else fall back to SUPABASE_KEY
+          sb_url = os.getenv("SUPABASE_URL")
+          srv = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+          if not (sb_url and srv):
+              print("ERROR: SUPABASE_URL and one of SUPABASE_SERVICE_ROLE_KEY / SUPABASE_KEY are required")
+              sys.exit(1)
+          exp("SUPABASE_SERVICE_ROLE_KEY", srv)
+
+          tenant = (os.getenv("TENANT_ID") or os.getenv("SELLER_ID") or "default").strip()
+          exp("TENANT_ID", tenant)
+
+          mps = os.getenv("MARKETPLACES_JSON") or '["DE"]'
           try:
-              mps=json.loads(os.environ["MARKETPLACES_JSON"])
-              assert isinstance(mps,list) and all(isinstance(x,str) for x in mps)
+              arr = json.loads(mps); assert isinstance(arr, list) and all(isinstance(x,str) for x in arr)
           except Exception as e:
-              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("Error:", e); sys.exit(1)
-          print("Config (orders) OK ✓")
+              print('ERROR: MARKETPLACES_JSON must be JSON like ["DE","FR"]'); print("detail:", e); sys.exit(1)
+
+          for k in ["LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN"]:
+              if not os.getenv(k): print(f"ERROR: missing {k}") or sys.exit(1)
+
+          print("Config (orders) normalized ✓")
           PY
 
       - name: Compute period (last month)
@@ -159,7 +190,7 @@ jobs:
         run: |
           set -e
           MP_LIST=$(python - <<'PY'
-          import os, json; print("\n".join(json.loads(os.environ["MARKETPLACES_JSON"])))
+          import os, json; print("\n".join(json.loads(os.environ.get("MARKETPLACES_JSON",'["DE"]'))))
           PY
           )
           for MP in $MP_LIST; do
