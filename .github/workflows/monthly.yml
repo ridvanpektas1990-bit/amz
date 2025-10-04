@@ -1,102 +1,122 @@
-name: monthly-etl
+name: Monthly ETL
 
 on:
-  workflow_dispatch:
-    inputs:
-      year:
-        description: "ORDERS_YEAR (optional override)"
-        required: false
-      month:
-        description: "ORDERS_MONTH (1-12, optional override)"
-        required: false
   schedule:
-    - cron: "15 3 3 * *"  # jeden 3. um 03:15 UTC → verarbeitet den Vormonat
+    - cron: "15 2 3 * *"   # UTC
+  workflow_dispatch: {}
 
 jobs:
-  etl:
+  fees:
     runs-on: ubuntu-latest
-    # Mehrere Marktplätze? Hinterlege in Repo-Variable MARKETPLACES_JSON z.B. ["DE","FR"]
-    strategy:
-      fail-fast: false
-      matrix:
-        marketplace: ${{ fromJSON(vars.MARKETPLACES_JSON || '["DE"]') }}
-
+    env:
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      SELLER_ID: ${{ vars.SELLER_ID }}
+      MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+      LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+      SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install -U pip
+          pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
 
-      - name: Compute period (default = last month)
-        id: period
-        env:
-          IN_YEAR: ${{ github.event.inputs.year }}
-          IN_MONTH: ${{ github.event.inputs.month }}
+      # ⬇️ Hier einfügen: Validate config (VOR dem Python-Run)
+      - name: Validate config
         run: |
-          python - <<'PY'
-          import os
-          from datetime import date, timedelta
-          y = os.getenv("IN_YEAR")
-          m = os.getenv("IN_MONTH")
-          if y and m:
-              Y, M = int(y), int(m)
-          else:
-              first = date.today().replace(day=1)
-              lm = first - timedelta(days=1)
-              Y, M = lm.year, lm.month
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              print(f"year={Y}", file=f)
-              print(f"month={M}", file=f)
+          set -e
+          python - << 'PY'
+          import os, json, sys
+          required = [
+            "SUPABASE_URL","LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN",
+            "TENANT_ID","MARKETPLACES_JSON"
+          ]
+          missing = [k for k in required if not os.getenv(k)]
+          if not os.getenv("SUPABASE_KEY") and not os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+              print("At least one of SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY must be provided")
+              sys.exit(1)
+          if missing:
+              print("Missing env:", missing); sys.exit(1)
+          try:
+              mps = json.loads(os.environ["MARKETPLACES_JSON"])
+              assert isinstance(mps, list) and all(isinstance(x, str) for x in mps)
+          except Exception as e:
+              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]')
+              print("Error:", e); sys.exit(1)
+          print("Config looks good ✓")
           PY
 
-      - name: Run FEES ETL
+      - name: Run Fees
+        working-directory: libs/finance
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}                # reicht, da RLS/Policies vorhanden
-          LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
-          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
-          SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
-          TENANT_ID: ${{ vars.TENANT_ID }}                         # z.B. SELLER_ID
-          MARKETPLACE: ${{ matrix.marketplace }}                   # DE, FR, …
-          ORDERS_YEAR: ${{ steps.period.outputs.year }}
-          ORDERS_MONTH: ${{ steps.period.outputs.month }}
-          LOCAL_TZ: Europe/Berlin
-          FINANCE_PACE_SECONDS: "3.5"
+          # Monat/Jahr optional – default: Vormonat aus deinem Script
+          ORDERS_YEAR: ""
+          ORDERS_MONTH: ""
         run: |
-          python libs/finance/AmzT_Fee.py
+          # Beispiel: nur DE (oder in einer Schleife über MARKETPLACES_JSON)
+          export MARKETPLACE=DE
+          python AmzT_Fee.py
 
-      - name: Cooldown (gegen 429)
-        run: sleep 15
-
-      - name: Run ORDERS ETL
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          # Für Orders bevorzugt Service-Role, außer deine RLS lässt anon Inserts zu:
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
-          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
-          SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
-          TENANT_ID: ${{ vars.TENANT_ID }}            # wenn leer → fällt dein Script auf SELLER_ID/default
-          SELLER_ID: ${{ vars.SELLER_ID }}
-          MARKETPLACE: ${{ matrix.marketplace }}       # DE, FR, …
-          ORDERS_YEAR: ${{ steps.period.outputs.year }}
-          ORDERS_MONTH: ${{ steps.period.outputs.month }}
-          LOCAL_TZ: Europe/Berlin
-          ORDERS_DATE_MODE: created                    # oder "updated"
-          WRITE_CSV: "0"
-          ORDERS_PACE_SECONDS: "2.5"
-        run: |
-          python libs/finance/AmzT_Sales.py
-
-      - name: Upload CSV artifacts (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
+  orders:
+    runs-on: ubuntu-latest
+    needs: fees
+    env:
+      TENANT_ID: ${{ vars.TENANT_ID }}
+      SELLER_ID: ${{ vars.SELLER_ID }}
+      MARKETPLACES_JSON: ${{ vars.MARKETPLACES_JSON }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      LWA_APP_ID: ${{ secrets.LWA_APP_ID }}
+      LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+      SP_API_REFRESH_TOKEN: ${{ secrets.SP_API_REFRESH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: etl-csvs-${{ steps.period.outputs.year }}-${{ steps.period.outputs.month }}-${{ matrix.marketplace }}
-          path: output/*.csv
-          if-no-files-found: ignore
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
+
+      # ⬇️ Hier wieder einfügen (vor dem Orders-Run)
+      - name: Validate config
+        run: |
+          set -e
+          python - << 'PY'
+          import os, json, sys
+          required = [
+            "SUPABASE_URL","LWA_APP_ID","LWA_CLIENT_SECRET","SP_API_REFRESH_TOKEN",
+            "TENANT_ID","MARKETPLACES_JSON"
+          ]
+          missing = [k for k in required if not os.getenv(k)]
+          if not os.getenv("SUPABASE_KEY") and not os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
+              print("At least one of SUPABASE_KEY or SUPABASE_SERVICE_ROLE_KEY must be provided")
+              sys.exit(1)
+          if missing:
+              print("Missing env:", missing); sys.exit(1)
+          try:
+              mps = json.loads(os.environ["MARKETPLACES_JSON"])
+              assert isinstance(mps, list) and all(isinstance(x, str) for x in mps)
+          except Exception as e:
+              print('MARKETPLACES_JSON must be JSON like ["DE","FR"]')
+              print("Error:", e); sys.exit(1)
+          print("Config looks good ✓")
+          PY
+
+      - name: Run Orders
+        working-directory: libs/finance
+        env:
+          WRITE_CSV: "0"
+          ORDERS_DATE_MODE: "created"
+        run: |
+          export MARKETPLACE=DE
+          python AmzT_Sales.py
