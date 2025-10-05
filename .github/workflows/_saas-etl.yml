@@ -7,7 +7,6 @@ on:
       period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
       tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
       which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
-      # Wichtig: als STRING, damit aufrufende Workflows (workflow_dispatch) sauber übergeben können
       max_parallel:  { type: string, required: false, default: "8" }
     secrets:
       SUPABASE_URL:              { required: true }
@@ -70,12 +69,10 @@ jobs:
                   return codes
               if isinstance(marketplaces, list):
                   for it in marketplaces:
-                      if isinstance(it, str):
-                          codes.append(it)
+                      if isinstance(it, str): codes.append(it)
                       elif isinstance(it, dict):
                           for k in ("code","marketplace","marketplace_code"):
-                              if it.get(k):
-                                  codes.append(str(it[k])); break
+                              if it.get(k): codes.append(str(it[k])); break
                           else:
                               mid = str(it.get("id") or it.get("marketplaceId") or "")
                               if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
@@ -92,7 +89,6 @@ jobs:
                                   if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
               return [str(c).strip().upper() for c in codes if str(c).strip()]
 
-          # Regions-Mapping (SP-API Endpoints)
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
           FE = {"JP","AU","SG"}
@@ -106,8 +102,7 @@ jobs:
           for row in rows:
               tenant = (row.get("tenant_id") or "").strip()
               if not tenant: continue
-              if filt_tenants != ["ALL"] and tenant not in filt_tenants:
-                  continue
+              if filt_tenants != ["ALL"] and tenant not in filt_tenants: continue
               seller_id = (row.get("seller_id") or "").strip()
               codes = extract_codes(row.get("marketplaces")) or ["DE"]
               for code in sorted(set(codes)):
@@ -137,7 +132,6 @@ jobs:
       group: saas-${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}-${{ matrix.tenant }}-${{ matrix.marketplace }}
       cancel-in-progress: false
     strategy:
-      # cast von String → Zahl
       max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.prep-matrix.outputs.matrix) }}
 
@@ -150,6 +144,14 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -U python-amazon-sp-api supabase python-dotenv requests tzdata
+
+      - name: Show matrix item
+        run: |
+          echo "TENANT=${{ matrix.tenant }}"
+          echo "SELLER_ID=${{ matrix.seller_id }}"
+          echo "MARKETPLACE=${{ matrix.marketplace }}"
+          echo "REGION=${{ matrix.region }}"
+          echo "PERIOD=${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}"
 
       - name: Show repo (top)
         run: |
@@ -201,9 +203,11 @@ jobs:
           )
 
           if not fee:
-              sys.exit("Could not find fee script – set repo variable FEE_SCRIPT to relative path, e.g. libs/finance/AmzT_Fee.py")
+              print("::error::Could not find fee script. Set repo variable FEE_SCRIPT to relative path, e.g. libs/finance/AmzT_Fee.py")
+              sys.exit(1)
           if not orders:
-              sys.exit("Could not find orders script – set repo variable ORDERS_SCRIPT to relative path, e.g. libs/orders/AmzT_Sales.py")
+              print("::error::Could not find orders script. Set repo variable ORDERS_SCRIPT to relative path, e.g. libs/orders/AmzT_Sales.py or orders_month_supabase.py")
+              sys.exit(1)
 
           print("FEE:", fee)
           print("ORDERS:", orders)
@@ -228,11 +232,13 @@ jobs:
           tid = os.environ["TENANT_ID"]
           reg = os.environ["REGION"]
           url = f"{sb}/rest/v1/amazon_connections?tenant_id=eq.{tid}&region=eq.{reg}&select=refresh_token"
+          print("Fetch:", url)
           req = urllib.request.Request(url, headers={"apikey": key, "Authorization": f"Bearer {key}"})
           with urllib.request.urlopen(req, timeout=25) as r:
               data = json.loads(r.read().decode("utf-8"))
           if not data:
               url2 = f"{sb}/rest/v1/amazon_connections?tenant_id=eq.{tid}&select=refresh_token"
+              print("Fallback:", url2)
               req2 = urllib.request.Request(url2, headers={"apikey": key, "Authorization": f"Bearer {key}"})
               with urllib.request.urlopen(req2, timeout=25) as r2:
                   data = json.loads(r2.read().decode("utf-8"))
@@ -243,6 +249,24 @@ jobs:
           print(f"::add-mask::{tok}")
           with open(os.environ["GITHUB_ENV"],"a") as f:
               f.write(f"SP_API_REFRESH_TOKEN={tok}\n")
+          PY
+
+      - name: Preflight env (fees)
+        if: ${{ inputs.which == 'beides' || inputs.which == 'fees' }}
+        env:
+          LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SRK:               ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python - << 'PY'
+          import os, sys
+          need = ["SP_API_REFRESH_TOKEN","LWA_CLIENT_ID","LWA_CLIENT_SECRET","SUPABASE_URL","SRK"]
+          miss = [k for k in need if not os.getenv(k)]
+          print("Check FEES env…")
+          for k in need:
+            print(f" - {k}:", "OK" if os.getenv(k) else "MISSING")
+          if miss: sys.exit(1)
           PY
 
       - name: Run Fees (last month)
@@ -259,10 +283,28 @@ jobs:
           MARKETPLACE: ${{ matrix.marketplace }}
           ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
           ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
-          LOCAL_TZ:    ${{ vars.LOCAL_TZ || 'Europe/Istanbul' }}
-          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES || '500' }}
+          LOCAL_TZ:    ${{ vars.LOCAL_TZ && vars.LOCAL_TZ || 'Europe/Istanbul' }}
+          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES && vars.SPAPI_MAX_TOKEN_PAGES || '500' }}
         run: |
           python "${{ steps.detect.outputs.fee_script }}"
+
+      - name: Preflight env (orders)
+        if: ${{ inputs.which == 'beides' || inputs.which == 'orders' }}
+        env:
+          LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
+          SRK:               ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python - << 'PY'
+          import os, sys
+          need = ["SP_API_REFRESH_TOKEN","LWA_CLIENT_ID","LWA_CLIENT_SECRET","SUPABASE_URL","SRK"]
+          miss = [k for k in need if not os.getenv(k)]
+          print("Check ORDERS env…")
+          for k in need:
+            print(f" - {k}:", "OK" if os.getenv(k) else "MISSING")
+          if miss: sys.exit(1)
+          PY
 
       - name: Run Orders (last month)
         if: ${{ inputs.which == 'beides' || inputs.which == 'orders' }}
@@ -279,6 +321,6 @@ jobs:
           ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
           ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
           ORDERS_DATE_MODE: "created"
-          LOCAL_TZ:    ${{ vars.LOCAL_TZ || 'Europe/Istanbul' }}
+          LOCAL_TZ:    ${{ vars.LOCAL_TZ && vars.LOCAL_TZ || 'Europe/Istanbul' }}
         run: |
           python "${{ steps.detect.outputs.orders_script }}"
