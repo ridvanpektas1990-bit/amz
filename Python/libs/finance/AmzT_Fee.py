@@ -97,7 +97,7 @@ FEES_ON_CONFLICT = os.getenv(
     # exakt wie dein PK in amazon_fees (ohne tenant_id):
     "amazon_order_id,seller_sku,marketplace,period_year,period_month,currency,transaction_phase",
 )
-BATCH_SIZE = int(os.getenv("SUPABASE_BATCH_SIZE", "500"))
+BATCH_SIZE = int(os.getenv("SUPABASE_BATCH_SIZE", "300"))
 
 FEE_LINES_TABLE       = os.getenv("SUPABASE_FEE_LINES_TABLE", "amazon_fee_lines")
 FEE_LINES_ON_CONFLICT = os.getenv("SUPABASE_FEE_LINES_ON_CONFLICT", "line_hash")
@@ -127,7 +127,7 @@ def _filter_conflict(conflict: str, removed: set) -> str:
     cols = [c for c in cols if c not in removed]
     return ",".join(cols)
 
-def upsert_rows(table: str, rows: List[dict], on_conflict: str, batch_size: int = 500):
+def upsert_rows(table: str, rows: List[dict], on_conflict: str, batch_size: int = 300):
     if not rows:
         print(f"# {table}: keine Daten zum Upsert.")
         return
