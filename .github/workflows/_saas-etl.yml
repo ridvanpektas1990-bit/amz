@@ -1,0 +1,264 @@
+name: SaaS ETL (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      period_year:   { type: string, required: false, description: "YYYY (leer = Vormonat)" }
+      period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
+      tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
+      which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
+      max_parallel:  { type: number, required: false, default: 8 }
+    secrets:
+      SUPABASE_URL:              { required: true }
+      SUPABASE_SERVICE_ROLE_KEY: { required: true }
+      LWA_CLIENT_ID:             { required: true }
+      LWA_CLIENT_SECRET:         { required: true }
+
+jobs:
+  prep-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      year:   ${{ steps.mk.outputs.year }}
+      month:  ${{ steps.mk.outputs.month }}
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - id: mk
+        env:
+          IN_PERIOD_YEAR:  ${{ inputs.period_year }}
+          IN_PERIOD_MONTH: ${{ inputs.period_month }}
+          IN_TENANTS:      ${{ inputs.tenants }}
+          SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:    ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python - << 'PY'
+          import os, json, urllib.request
+          from datetime import date, timedelta
+
+          def last_month():
+              t=date.today(); first=t.replace(day=1); prev=first-timedelta(days=1); return prev.year, prev.month
+          yy = int(os.getenv("IN_PERIOD_YEAR") or 0) or last_month()[0]
+          mm = int(os.getenv("IN_PERIOD_MONTH") or 0) or last_month()[1]
+
+          filt_tenants = [x.strip() for x in (os.getenv("IN_TENANTS") or "ALL").split(",") if x.strip()]
+
+          sb_url = os.getenv("SUPABASE_URL").rstrip("/")
+          sb_key = os.getenv("SUPABASE_KEY")
+          url = f"{sb_url}/rest/v1/amazon_connections?select=tenant_id,region,refresh_token,seller_id,marketplaces"
+          req = urllib.request.Request(url, headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"})
+          rows = []
+          with urllib.request.urlopen(req, timeout=30) as r:
+              rows = json.loads(r.read().decode("utf-8"))
+
+          # Helper: marketplaces-json zu Codes
+          def extract_codes(marketplaces):
+              codes = []
+              if marketplaces is None:
+                  return codes
+              if isinstance(marketplaces, list):
+                  for it in marketplaces:
+                      if isinstance(it, str):
+                          codes.append(it)
+                      elif isinstance(it, dict):
+                          # versuche gängige Felder
+                          for k in ("code","marketplace","marketplace_code"):
+                              if k in it and it[k]:
+                                  codes.append(str(it[k]))
+                                  break
+                          else:
+                              # id → heuristik auf EU codes falls enthalten
+                              mid = str(it.get("id") or it.get("marketplaceId") or "")
+                              MAP_ID2CODE = {
+                                "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
+                                "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
+                                "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
+                                "A33AVAJ2PDY3EV":"TR"
+                              }
+                              if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
+              elif isinstance(marketplaces, dict):
+                  # z.B. { "codes": ["DE","FR"] }
+                  for k in ("codes","list","marketplaces"):
+                      v = marketplaces.get(k)
+                      if isinstance(v, list):
+                          for x in v:
+                              if isinstance(x, str): codes.append(x)
+                              elif isinstance(x, dict):
+                                  for kk in ("code","marketplace","marketplace_code"):
+                                      if kk in x and x[kk]: codes.append(str(x[kk]))
+                                  mid = str(x.get("id") or x.get("marketplaceId") or "")
+                                  MAP_ID2CODE = {
+                                    "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
+                                    "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
+                                    "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
+                                    "A33AVAJ2PDY3EV":"TR"
+                                  }
+                                  if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
+              return [c.strip().upper() for c in codes if str(c).strip()]
+
+              # Ende helper
+
+          # Map Marketplace → Region (für Token-Auswahl)
+          EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR"}
+          NA = {"US","CA","MX"}
+          FE = {"JP","AU","SG"}
+          def mp_region(code):
+              if code in EU: return "eu"
+              if code in NA: return "na"
+              if code in FE: return "fe"
+              return "eu"
+
+          include = []
+          for row in rows:
+              tenant = (row.get("tenant_id") or "").strip()
+              if not tenant: continue
+              if filt_tenants!=["ALL"] and tenant not in filt_tenants: 
+                  continue
+              seller_id = (row.get("seller_id") or "").strip()
+              region = (row.get("region") or "eu").strip().lower()
+              codes = extract_codes(row.get("marketplaces"))
+              if not codes:
+                  codes = ["DE"]  # Default
+              for code in sorted(set(codes)):
+                  # Region prüfen: wenn nicht passend, überschreiben wir Region anhand des Codes
+                  r = mp_region(code)
+                  include.append({"tenant": tenant, "marketplace": code, "region": r, "seller_id": seller_id})
+
+          if not include:
+              raise SystemExit("No matrix from amazon_connections")
+
+          out = {"include": include}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(out)}\n")
+              f.write(f"year={yy}\n")
+              f.write(f"month={mm}\n")
+          PY
+
+  etl:
+    name: ${{ matrix.tenant }} @ ${{ matrix.marketplace }} → ${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}
+    needs: prep-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    concurrency:
+      group: saas-${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}-${{ matrix.tenant }}-${{ matrix.marketplace }}
+      cancel-in-progress: false
+    strategy:
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix: ${{ fromJSON(needs.prep-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -U python-amazon-sp-api supabase python-dotenv requests tzdata
+
+      - name: Autodetect scripts
+        id: detect
+        run: |
+          set -e
+          FEE=$(python - <<'PY'
+          import pathlib, sys
+          root=pathlib.Path("."); c=[]
+          for n in ["AmzT_Fee.py","libs/finance/AmzT_Fee.py","finance/AmzT_Fee.py"]:
+              p=root/n; 
+              if p.exists(): c.append(p)
+          if not c:
+              for p in root.rglob("AmzT_Fee.py"): c.append(p)
+          if not c: sys.exit("Could not find AmzT_Fee.py")
+          print(sorted(c,key=lambda p: len(str(p)))[0])
+          PY
+          )
+          ORD=$(python - <<'PY'
+          import pathlib, sys
+          root=pathlib.Path("."); c=[]
+          for n in ["AmzT_Sales.py","libs/orders/AmzT_Sales.py","orders/AmzT_Sales.py","orders_month_supabase.py","AmzT_Orders.py"]:
+              p=root/n; 
+              if p.exists(): c.append(p)
+          if not c:
+              for p in root.rglob("AmzT_Sales.py"): c.append(p)
+          if not c:
+              for p in root.rglob("orders_month_supabase.py"): c.append(p)
+          if not c: sys.exit("Could not find AmzT_Sales.py / orders_month_supabase.py")
+          print(sorted(c,key=lambda p: len(str(p)))[0])
+          PY
+          )
+          echo "fee_script=$FEE"   >> $GITHUB_OUTPUT
+          echo "orders_script=$ORD" >> $GITHUB_OUTPUT
+
+      - name: Fetch tenant refresh_token (region-aware)
+        id: token
+        env:
+          SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
+          SRK:           ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TENANT_ID:     ${{ matrix.tenant }}
+          REGION:        ${{ matrix.region }}
+        run: |
+          set -e
+          python - << 'PY'
+          import os, json, urllib.request, sys
+          sb = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SRK"]
+          tid = os.environ["TENANT_ID"]
+          reg = os.environ["REGION"]
+          url = f"{sb}/rest/v1/amazon_connections?tenant_id=eq.{tid}&region=eq.{reg}&select=refresh_token"
+          req = urllib.request.Request(url, headers={"apikey": key, "Authorization": f"Bearer {key}"})
+          with urllib.request.urlopen(req, timeout=25) as r:
+              data = json.loads(r.read().decode("utf-8"))
+          if not data:
+              # Fallback: ohne Regionsfilter
+              url2 = f"{sb}/rest/v1/amazon_connections?tenant_id=eq.{tid}&select=refresh_token"
+              req2 = urllib.request.Request(url2, headers={"apikey": key, "Authorization": f"Bearer {key}"})
+              with urllib.request.urlopen(req2, timeout=25) as r2:
+                  data = json.loads(r2.read().decode("utf-8"))
+          if not data or not data[0].get("refresh_token"):
+              print(f"::error::No refresh_token for tenant={tid} (region={reg})")
+              sys.exit(1)
+          tok = data[0]["refresh_token"]
+          print(f"::add-mask::{tok}")
+          with open(os.environ["GITHUB_ENV"],"a") as f:
+              f.write(f"SP_API_REFRESH_TOKEN={tok}\n")
+          PY
+
+      - name: Run Fees (last month)
+        if: ${{ inputs.which == 'beides' || inputs.which == 'fees' }}
+        env:
+          # SP-API (App creds)
+          LWA_APP_ID:        ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          # Tenant-spezifisches Token via GITHUB_ENV
+          # Supabase
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY:              ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Kontext
+          TENANT_ID:   ${{ matrix.tenant }}
+          SELLER_ID:   ${{ matrix.seller_id }}
+          MARKETPLACE: ${{ matrix.marketplace }}
+          ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
+          ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
+          LOCAL_TZ:    ${{ vars.LOCAL_TZ || 'Europe/Istanbul' }}
+          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES || '500' }}
+        run: |
+          python "${{ steps.detect.outputs.fee_script }}"
+
+      - name: Run Orders (last month)
+        if: ${{ inputs.which == 'beides' || inputs.which == 'orders' }}
+        env:
+          LWA_APP_ID:        ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_KEY:              ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TENANT_ID:   ${{ matrix.tenant }}
+          SELLER_ID:   ${{ matrix.seller_id }}
+          MARKETPLACE: ${{ matrix.marketplace }}
+          ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
+          ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
+          ORDERS_DATE_MODE: "created"
+          LOCAL_TZ:    ${{ vars.LOCAL_TZ || 'Europe/Istanbul' }}
+        run: |
+          python "${{ steps.detect.outputs.orders_script }}"
