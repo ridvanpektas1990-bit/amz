@@ -23,7 +23,8 @@ jobs:
       month:  ${{ steps.mk.outputs.month }}
     steps:
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       - id: mk
         env:
@@ -33,7 +34,7 @@ jobs:
           SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:    ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python - << 'PY'
+          python - <<'PY'
           import os, json, urllib.request
           from datetime import date, timedelta
 
@@ -55,73 +56,63 @@ jobs:
           with urllib.request.urlopen(req, timeout=30) as r:
               rows = json.loads(r.read().decode("utf-8"))
 
-          MAP_ID2CODE = {
-              "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
-              "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
-              "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
-              "A33AVAJ2PDY3EV":"TR","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA",
-              "A2VIGQ35RCS4UG":"EG"
-          }
+          def extract_codes(marketplaces):
+              # Falls als String gespeichert/geliefert -> JSON parsen
+              if isinstance(marketplaces, str):
+                  s = marketplaces.strip()
+                  if s:
+                      try:
+                          marketplaces = json.loads(s)
+                      except Exception:
+                          # Falls doch nur CSV wie "DE,FR" o.ä.
+                          if "," in s and s.replace(",", "").strip():
+                              return [c.strip().upper() for c in s.split(",") if c.strip()]
+                          marketplaces = None
 
-def extract_codes(marketplaces):
-    # Falls als String gespeichert/geliefert -> JSON parsen
-    if isinstance(marketplaces, str):
-        s = marketplaces.strip()
-        if s:
-            try:
-                marketplaces = json.loads(s)
-            except Exception:
-                # Falls doch nur CSV wie "DE,FR" o.ä.
-                if "," in s and s.replace(",", "").strip():
-                    return [c.strip().upper() for c in s.split(",") if c.strip()]
-                # sonst leer zurück
-                marketplaces = None
+              codes = []
+              MAP_ID2CODE = {
+                  "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT","A1RKKUPIHCS9HS":"ES",
+                  "A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL","A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL",
+                  "AMEN7PMS3EDWL":"BE","A33AVAJ2PDY3EV":"TR","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA",
+                  "A2VIGQ35RCS4UG":"EG","ATVPDKIKX0DER":"US","A2EUQ1WTGCTBG2":"CA","A1AM78C64UM0Y8":"MX",
+                  "A1VC38T7YXB528":"JP","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA","A2VIGQ35RCS4UG":"EG"
+              }
 
-    codes = []
-    MAP_ID2CODE = {
-        "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT","A1RKKUPIHCS9HS":"ES",
-        "A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL","A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL",
-        "AMEN7PMS3EDWL":"BE","A33AVAJ2PDY3EV":"TR","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA",
-        "A2VIGQ35RCS4UG":"EG","ATVPDKIKX0DER":"US","A2EUQ1WTGCTBG2":"CA","A1AM78C64UM0Y8":"MX",
-        "A1VC38T7YXB528":"JP","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA","A2VIGQ35RCS4UG":"EG"
-    }
+              if marketplaces is None:
+                  return codes
 
-    if marketplaces is None:
-        return codes
+              if isinstance(marketplaces, list):
+                  for it in marketplaces:
+                      if isinstance(it, str):
+                          codes.append(it)
+                      elif isinstance(it, dict):
+                          # bevorzugt "code"
+                          c = it.get("code") or it.get("marketplace") or it.get("marketplace_code")
+                          if c:
+                              codes.append(str(c))
+                          else:
+                              mid = str(it.get("id") or it.get("marketplaceId") or "")
+                              if mid in MAP_ID2CODE:
+                                  codes.append(MAP_ID2CODE[mid])
 
-    if isinstance(marketplaces, list):
-        for it in marketplaces:
-            if isinstance(it, str):
-                codes.append(it)
-            elif isinstance(it, dict):
-                # bevorzugt "code"
-                c = it.get("code") or it.get("marketplace") or it.get("marketplace_code")
-                if c: 
-                    codes.append(str(c))
-                else:
-                    mid = str(it.get("id") or it.get("marketplaceId") or "")
-                    if mid in MAP_ID2CODE: 
-                        codes.append(MAP_ID2CODE[mid])
+              elif isinstance(marketplaces, dict):
+                  for k in ("codes","list","marketplaces"):
+                      v = marketplaces.get(k)
+                      if isinstance(v, list):
+                          for x in v:
+                              if isinstance(x, str):
+                                  codes.append(x)
+                              elif isinstance(x, dict):
+                                  c = x.get("code") or x.get("marketplace") or x.get("marketplace_code")
+                                  if c:
+                                      codes.append(str(c))
+                                  else:
+                                      mid = str(x.get("id") or x.get("marketplaceId") or "")
+                                      if mid in MAP_ID2CODE:
+                                          codes.append(MAP_ID2CODE[mid])
 
-    elif isinstance(marketplaces, dict):
-        for k in ("codes","list","marketplaces"):
-            v = marketplaces.get(k)
-            if isinstance(v, list):
-                for x in v:
-                    if isinstance(x, str):
-                        codes.append(x)
-                    elif isinstance(x, dict):
-                        c = x.get("code") or x.get("marketplace") or x.get("marketplace_code")
-                        if c: 
-                            codes.append(str(c))
-                        else:
-                            mid = str(x.get("id") or x.get("marketplaceId") or "")
-                            if mid in MAP_ID2CODE:
-                                codes.append(MAP_ID2CODE[mid])
-
-    # säubern & upper
-    return [str(c).strip().upper() for c in codes if str(c).strip()]
-
+              # säubern & upper
+              return [str(c).strip().upper() for c in codes if str(c).strip()]
 
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
@@ -135,8 +126,10 @@ def extract_codes(marketplaces):
           include = []
           for row in rows:
               tenant = (row.get("tenant_id") or "").strip()
-              if not tenant: continue
-              if filt_tenants != ["ALL"] and tenant not in filt_tenants: continue
+              if not tenant:
+                  continue
+              if filt_tenants != ["ALL"] and tenant not in filt_tenants:
+                  continue
               seller_id = (row.get("seller_id") or "").strip()
               codes = extract_codes(row.get("marketplaces")) or ["DE"]
               for code in sorted(set(codes)):
@@ -172,7 +165,8 @@ def extract_codes(marketplaces):
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
 
       - name: Install deps
         run: |
@@ -195,7 +189,7 @@ def extract_codes(marketplaces):
       - name: Autodetect scripts
         id: detect
         env:
-          FEE_HINT: ${{ vars.FEE_SCRIPT }}
+          FEE_HINT:    ${{ vars.FEE_SCRIPT }}
           ORDERS_HINT: ${{ vars.ORDERS_SCRIPT }}
         run: |
           set -e
@@ -259,7 +253,7 @@ def extract_codes(marketplaces):
           REGION:        ${{ matrix.region }}
         run: |
           set -e
-          python - << 'PY'
+          python - <<'PY'
           import os, json, urllib.request, sys
           sb = os.environ["SUPABASE_URL"].rstrip("/")
           key = os.environ["SRK"]
@@ -293,7 +287,7 @@ def extract_codes(marketplaces):
           SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
           SRK:               ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python - << 'PY'
+          python - <<'PY'
           import os, sys
           need = ["SP_API_REFRESH_TOKEN","LWA_CLIENT_ID","LWA_CLIENT_SECRET","SUPABASE_URL","SRK"]
           miss = [k for k in need if not os.getenv(k)]
@@ -318,7 +312,7 @@ def extract_codes(marketplaces):
           ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
           ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
           LOCAL_TZ:    ${{ vars.LOCAL_TZ && vars.LOCAL_TZ || 'Europe/Istanbul' }}
-          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES && vars.SPAPI_MAX_TOKEN_PAGES || '500' }}
+          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES && vars.SPAPI_MAX_TOKEN_PAGES || '200' }}
         run: |
           python "${{ steps.detect.outputs.fee_script }}"
 
@@ -330,7 +324,7 @@ def extract_codes(marketplaces):
           SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
           SRK:               ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python - << 'PY'
+          python - <<'PY'
           import os, sys
           need = ["SP_API_REFRESH_TOKEN","LWA_CLIENT_ID","LWA_CLIENT_SECRET","SUPABASE_URL","SRK"]
           miss = [k for k in need if not os.getenv(k)]
