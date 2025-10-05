@@ -1,0 +1,35 @@
+name: SaaS ETL (manual run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      period_year:
+        description: "YYYY (leer = Vormonat)"
+        required: false
+      period_month:
+        description: "M oder MM (leer = Vormonat)"
+        required: false
+      tenants:
+        description: "CSV (z.B. AO5...,AO6...) oder ALL"
+        required: false
+        default: "ALL"
+      which:
+        description: "fees | orders | beides"
+        type: choice
+        options: [beides, fees, orders]
+        default: beides
+      max_parallel:
+        description: "Max parallel laufende Jobs"
+        required: false
+        default: 8
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/_saas-etl.yml
+    with:
+      period_year:   ${{ inputs.period_year }}
+      period_month:  ${{ inputs.period_month }}
+      tenants:       ${{ inputs.tenants }}
+      which:         ${{ inputs.which }}
+      max_parallel:  ${{ inputs.max_parallel }}
+    secrets: inherit
