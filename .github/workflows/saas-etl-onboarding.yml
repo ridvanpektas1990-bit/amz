@@ -3,6 +3,10 @@ name: SaaS ETL (onboarding backfill)
 on:
   repository_dispatch:
     types: [onboarding-backfill]
+    
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   compute-months:
