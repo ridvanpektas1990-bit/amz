@@ -7,7 +7,7 @@ on:
       period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
       tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
       which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
-      max_parallel:  { type: string, required: false, default: "8" }
+      max_parallel:  { type: string, required: false, default: "2" }
     secrets:
       SUPABASE_URL:              { required: true }
       SUPABASE_SERVICE_ROLE_KEY: { required: true }
