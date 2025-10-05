@@ -63,8 +63,6 @@ jobs:
               "A2VIGQ35RCS4UG":"EG"
           }
 
-import json
-
 def extract_codes(marketplaces):
     # Falls als String gespeichert/geliefert -> JSON parsen
     if isinstance(marketplaces, str):
