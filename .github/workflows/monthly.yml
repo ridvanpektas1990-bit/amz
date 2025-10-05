@@ -9,6 +9,10 @@ on:
       period_month: { type: string, required: false, description: "M oder MM" }
       tenants:      { type: string, required: false, description: "CSV oder ALL", default: "ALL" }
       which:        { type: choice,  required: false, default: beides, options: [beides, fees, orders] }
+      
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   call:
