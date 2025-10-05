@@ -3,39 +3,16 @@ name: SaaS ETL (reusable)
 on:
   workflow_call:
     inputs:
-      period_year:   { type: string, required: false }
-      period_month:  { type: string, required: false }
-      tenants:       { type: string, required: false, default: "ALL" }
-      which:         { type: string, required: false, default: "beides" }
+      period_year:   { type: string, required: false, description: "YYYY (leer = Vormonat)" }
+      period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
+      tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
+      which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
       max_parallel:  { type: number, required: false, default: 8 }
     secrets:
       SUPABASE_URL:              { required: true }
       SUPABASE_SERVICE_ROLE_KEY: { required: true }
       LWA_CLIENT_ID:             { required: true }
       LWA_CLIENT_SECRET:         { required: true }
-
-  workflow_dispatch:
-    inputs:
-      period_year:
-        description: "YYYY (leer = Vormonat)"
-        required: false
-      period_month:
-        description: "M oder MM (leer = Vormonat)"
-        required: false
-      tenants:
-        description: "CSV oder ALL"
-        required: false
-        default: "ALL"
-      which:
-        description: "fees | orders | beides"
-        type: choice
-        options: [beides, fees, orders]
-        default: beides
-      max_parallel:
-        description: "Max parallel laufende Jobs"
-        required: false
-        default: 8
-
 
 jobs:
   prep-matrix:
@@ -78,7 +55,6 @@ jobs:
           with urllib.request.urlopen(req, timeout=30) as r:
               rows = json.loads(r.read().decode("utf-8"))
 
-          # --- marketplaces -> Codes extrahieren (tolerant) -------------------
           MAP_ID2CODE = {
               "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
               "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
@@ -119,7 +95,6 @@ jobs:
                                   if mid in MAP_ID2CODE:
                                       codes.append(MAP_ID2CODE[mid])
               return [str(c).strip().upper() for c in codes if str(c).strip()]
-          # --------------------------------------------------------------------
 
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
@@ -140,7 +115,7 @@ jobs:
               seller_id = (row.get("seller_id") or "").strip()
               codes = extract_codes(row.get("marketplaces"))
               if not codes:
-                  codes = ["DE"]  # Default wenn NULL
+                  codes = ["DE"]
               for code in sorted(set(codes)):
                   include.append({
                       "tenant": tenant,
@@ -168,7 +143,7 @@ jobs:
       group: saas-${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}-${{ matrix.tenant }}-${{ matrix.marketplace }}
       cancel-in-progress: false
     strategy:
-      max-parallel: ${{ inputs.max_parallel }}
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.prep-matrix.outputs.matrix) }}
 
     steps:
@@ -196,30 +171,23 @@ jobs:
           python - <<'PY'
           import os, sys, pathlib
           root = pathlib.Path(".")
-
           def first_existing(hint, patterns, must_have=None):
-              # 1) fester Hint
               if hint:
                   p = root / hint
                   if p.exists():
                       return str(p)
-              # 2) Suche per Muster
               cands = []
               for pat in patterns:
                   cands += list(root.rglob(pat))
-              # 3) optional: inhaltlicher Check
               if must_have:
                   filtered = []
                   for p in cands:
-                      try:
-                          txt = p.read_text(errors="ignore")
-                      except Exception:
-                          continue
+                      try: txt = p.read_text(errors="ignore")
+                      except Exception: continue
                       if any(m in txt for m in must_have):
                           filtered.append(p)
                   if filtered:
                       cands = filtered
-              # 4) beste Wahl (kürzester Pfad)
               if not cands:
                   return ""
               return str(sorted(cands, key=lambda p: len(str(p)))[0])
@@ -267,7 +235,6 @@ jobs:
           with urllib.request.urlopen(req, timeout=25) as r:
               data = json.loads(r.read().decode("utf-8"))
           if not data:
-              # Fallback: ohne Regionsfilter
               url2 = f"{sb}/rest/v1/amazon_connections?tenant_id=eq.{tid}&select=refresh_token"
               req2 = urllib.request.Request(url2, headers={"apikey": key, "Authorization": f"Bearer {key}"})
               with urllib.request.urlopen(req2, timeout=25) as r2:
@@ -284,15 +251,12 @@ jobs:
       - name: Run Fees (last month)
         if: ${{ inputs.which == 'beides' || inputs.which == 'fees' }}
         env:
-          # SP-API (App creds)
           LWA_APP_ID:        ${{ secrets.LWA_CLIENT_ID }}
           LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
           LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
-          # Supabase
           SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_KEY:              ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Kontext
           TENANT_ID:   ${{ matrix.tenant }}
           SELLER_ID:   ${{ matrix.seller_id }}
           MARKETPLACE: ${{ matrix.marketplace }}
