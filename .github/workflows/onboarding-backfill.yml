@@ -4,6 +4,10 @@ on:
   repository_dispatch:
     types: [onboarding-backfill]
 
+permissions:
+  contents: read
+  actions: write   # <-- wichtig: darf andere Workflows starten
+
 jobs:
   backfill:
     runs-on: ubuntu-latest
