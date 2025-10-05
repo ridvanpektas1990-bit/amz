@@ -3,25 +3,11 @@ name: SaaS ETL (manual run)
 on:
   workflow_dispatch:
     inputs:
-      period_year:
-        description: "YYYY (leer = Vormonat)"
-        required: false
-      period_month:
-        description: "M oder MM (leer = Vormonat)"
-        required: false
-      tenants:
-        description: "CSV (z.B. AO5...,AO6...) oder ALL"
-        required: false
-        default: "ALL"
-      which:
-        description: "fees | orders | beides"
-        type: choice
-        options: [beides, fees, orders]
-        default: beides
-      max_parallel:
-        description: "Max parallel laufende Jobs"
-        required: false
-        default: "8"   # <-- als String!
+      period_year:   { description: "YYYY (leer = Vormonat)", required: false, default: "" }
+      period_month:  { description: "M oder MM (leer = Vormonat)", required: false, default: "" }
+      tenants:       { description: "CSV oder ALL", required: false, default: "ALL" }
+      which:         { description: "fees|orders|beides", required: false, default: "beides" }
+      max_parallel:  { description: "1..20", required: false, default: "4" }
 
 jobs:
   call-reusable:
@@ -31,5 +17,9 @@ jobs:
       period_month:  ${{ inputs.period_month }}
       tenants:       ${{ inputs.tenants }}
       which:         ${{ inputs.which }}
-      max_parallel:  ${{ inputs.max_parallel }}   # String rein → im Reusable wird gecastet
-    secrets: inherit
+      max_parallel:  ${{ inputs.max_parallel }}
+    secrets:
+      SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      LWA_CLIENT_ID:             ${{ secrets.LWA_CLIENT_ID }}
+      LWA_CLIENT_SECRET:         ${{ secrets.LWA_CLIENT_SECRET }}
