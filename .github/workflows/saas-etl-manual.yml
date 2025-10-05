@@ -21,7 +21,7 @@ on:
       max_parallel:
         description: "Max parallel laufende Jobs"
         required: false
-        default: 8
+        default: "8"   # <-- als String!
 
 jobs:
   call-reusable:
@@ -31,5 +31,5 @@ jobs:
       period_month:  ${{ inputs.period_month }}
       tenants:       ${{ inputs.tenants }}
       which:         ${{ inputs.which }}
-      max_parallel:  ${{ inputs.max_parallel }}
+      max_parallel:  ${{ inputs.max_parallel }}   # String rein → im Reusable wird gecastet
     secrets: inherit
