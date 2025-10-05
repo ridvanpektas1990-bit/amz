@@ -1,0 +1,81 @@
+name: SaaS ETL (onboarding backfill)
+
+on:
+  repository_dispatch:
+    types: [onboarding-backfill]
+
+jobs:
+  compute-months:
+    runs-on: ubuntu-latest
+    outputs:
+      seed:   ${{ steps.mk.outputs.seed }}
+      bulk:   ${{ steps.mk.outputs.bulk }}
+    steps:
+      - id: mk
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import date, timedelta
+
+          def ym_add(y, m, delta):
+              # delta in Monaten relativ zu (y,m)
+              idx = (y*12 + (m-1)) + delta
+              ny, nm = divmod(idx, 12)
+              return ny, nm+1
+
+          today = date.today()
+          # "letzter Monat" relativ zu heute
+          first_this = today.replace(day=1)
+          last_month_end = first_this - timedelta(days=1)
+          y0, m0 = last_month_end.year, last_month_end.month
+
+          # 24 Monate: [y0,m0] abwärts
+          months = []
+          for d in range(24):
+              yy, mm = ym_add(y0, m0, -d)
+              months.append({"year": str(yy), "month": str(mm)})
+
+          # Seeds: die ersten 2 (aktueller letzter Monat & der davor)
+          seed = months[:2]
+          # Bulk: die restlichen 22
+          bulk = months[2:]
+
+          print("SEED:", seed)
+          print("BULK:", bulk)
+          with open("${{ github.output }}","w") as f:
+              f.write(f"seed={json.dumps(seed)}\n")
+              f.write(f"bulk={json.dumps(bulk)}\n")
+          PY
+
+  seed:
+    needs: compute-months
+    strategy:
+      max-parallel: 2
+      fail-fast: false
+      matrix:
+        item: ${{ fromJson(needs.compute-months.outputs.seed) }}
+    uses: ./.github/workflows/_saas-etl.yml
+    with:
+      period_year:  ${{ matrix.item.year }}
+      period_month: ${{ matrix.item.month }}
+      tenants:      ${{ github.event.client_payload.tenant }}
+      which:        "beides"
+      max_parallel: "2"
+    secrets: inherit
+
+  backfill:
+    needs: [compute-months, seed]
+    strategy:
+      # konservativ, um API-Quoten zu schonen
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        item: ${{ fromJson(needs.compute-months.outputs.bulk) }}
+    uses: ./.github/workflows/_saas-etl.yml
+    with:
+      period_year:  ${{ matrix.item.year }}
+      period_month: ${{ matrix.item.month }}
+      tenants:      ${{ github.event.client_payload.tenant }}
+      which:        "beides"
+      max_parallel: "2"
+    secrets: inherit
