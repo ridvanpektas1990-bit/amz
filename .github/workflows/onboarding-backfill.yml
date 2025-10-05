@@ -1,0 +1,68 @@
+name: Onboarding Backfill
+
+on:
+  repository_dispatch:
+    types: [onboarding-backfill]
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    env:
+      TENANT_ID:       ${{ github.event.client_payload.tenant }}
+      BACKFILL_MONTHS: ${{ github.event.client_payload.months || 24 }}
+      SEED_MONTHS:     ${{ github.event.client_payload.seed   || 2 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Kick off monthly runs (older months)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # reicht in Repo-Workflows
+        run: |
+          python - << 'PY'
+          import os, subprocess, time
+          from datetime import date
+
+          tenant = os.getenv("TENANT_ID")
+          months_total = int(os.getenv("BACKFILL_MONTHS", "24"))
+          seed_months  = int(os.getenv("SEED_MONTHS", "2"))  # wurden schon separat gestartet
+
+          # Hilfsfunktion: (jahr, monat) n Monate zurück vom "letzten vollen Monat"
+          def last_full_month():
+              t = date.today().replace(day=1)
+              prev = (t.replace(day=1))
+              prev = prev.replace(day=1)
+              # "letzter voller Monat" = der Monat vor dem aktuellen Monatsanfang
+              from datetime import timedelta
+              prev = t - timedelta(days=1)
+              return prev.year, prev.month
+
+          y, m = last_full_month()
+
+          # Liste bildet: m=letzter voller Monat, dann -1,-2,... (ohne die "seed_months")
+          ym = []
+          yy, mm = y, m
+          for i in range(months_total):
+              ym.append((yy, mm))
+              mm -= 1
+              if mm == 0:
+                  mm = 12
+                  yy -= 1
+
+          # erste "seed_months" hat der Callback schon losgetreten → hier den Rest:
+          ym = ym[seed_months:]
+
+          # Dispatch per gh workflow run (unser manueller Wrapper ruft das reusable auf)
+          for (yy, mm) in ym:
+              cmd = [
+                "gh","workflow","run","saas-etl-manual.yml",
+                "--ref","main",
+                "-f",f"period_year={yy}",
+                "-f",f"period_month={mm}",
+                "-f",f"tenants={tenant}",
+                "-f","which=beides"
+              ]
+              print("RUN:", " ".join(cmd))
+              subprocess.run(cmd, check=True)
+              time.sleep(2)  # leichte Drossel
+          PY
