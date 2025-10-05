@@ -5,7 +5,7 @@ on:
     inputs:
       period_year:   { type: string, required: false, description: "YYYY (leer = Vormonat)" }
       period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
-      tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
+      tenants:       { type: string, required: false, default: "ALL", description: "CSV (Filter) oder ALL" }
       which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
       max_parallel:  { type: string, required: false, default: "2" }
     secrets:
@@ -23,8 +23,7 @@ jobs:
       month:  ${{ steps.mk.outputs.month }}
     steps:
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
       - id: mk
         env:
@@ -33,8 +32,12 @@ jobs:
           IN_TENANTS:      ${{ inputs.tenants }}
           SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:    ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Optional: Aktivitätsfenster in Monaten (Default 12)
+          ACTIVITY_MONTHS: ${{ vars.ACTIVITY_MONTHS }}
+          # Optional: hart begrenzen (z.B. "DE,FR")
+          OVERRIDE_CODES:  ${{ vars.OVERRIDE_CODES }}
         run: |
-          python - <<'PY'
+          python - << 'PY'
           import os, json, urllib.request
           from datetime import date, timedelta
 
@@ -48,36 +51,39 @@ jobs:
           mm = int(os.getenv("IN_PERIOD_MONTH") or 0) or last_month()[1]
 
           filt_tenants = [x.strip() for x in (os.getenv("IN_TENANTS") or "ALL").split(",") if x.strip()]
-
           sb_url = os.getenv("SUPABASE_URL").rstrip("/")
           sb_key = os.getenv("SUPABASE_KEY")
+
+          # --- Verbindungen laden
           url = f"{sb_url}/rest/v1/amazon_connections?select=tenant_id,region,refresh_token,seller_id,marketplaces"
           req = urllib.request.Request(url, headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"})
           with urllib.request.urlopen(req, timeout=30) as r:
               rows = json.loads(r.read().decode("utf-8"))
 
+          # Mapping IDs <-> Codes
+          MAP_ID2CODE = {
+              "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
+              "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
+              "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
+              "A33AVAJ2PDY3EV":"TR","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA",
+              "A2VIGQ35RCS4UG":"EG","ATVPDKIKX0DER":"US","A2EUQ1WTGCTBG2":"CA","A1AM78C64UM0Y8":"MX",
+              "A1VC38T7YXB528":"JP"
+          }
+          CODE2ID = {v:k for k,v in MAP_ID2CODE.items()}
+
           def extract_codes(marketplaces):
-              # Falls als String gespeichert/geliefert -> JSON parsen
+              # akzeptiert JSON (Liste/Objekte) oder CSV-String
               if isinstance(marketplaces, str):
                   s = marketplaces.strip()
                   if s:
                       try:
                           marketplaces = json.loads(s)
                       except Exception:
-                          # Falls doch nur CSV wie "DE,FR" o.ä.
                           if "," in s and s.replace(",", "").strip():
                               return [c.strip().upper() for c in s.split(",") if c.strip()]
                           marketplaces = None
 
               codes = []
-              MAP_ID2CODE = {
-                  "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT","A1RKKUPIHCS9HS":"ES",
-                  "A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL","A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL",
-                  "AMEN7PMS3EDWL":"BE","A33AVAJ2PDY3EV":"TR","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA",
-                  "A2VIGQ35RCS4UG":"EG","ATVPDKIKX0DER":"US","A2EUQ1WTGCTBG2":"CA","A1AM78C64UM0Y8":"MX",
-                  "A1VC38T7YXB528":"JP","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA","A2VIGQ35RCS4UG":"EG"
-              }
-
               if marketplaces is None:
                   return codes
 
@@ -86,7 +92,6 @@ jobs:
                       if isinstance(it, str):
                           codes.append(it)
                       elif isinstance(it, dict):
-                          # bevorzugt "code"
                           c = it.get("code") or it.get("marketplace") or it.get("marketplace_code")
                           if c:
                               codes.append(str(c))
@@ -111,8 +116,41 @@ jobs:
                                       if mid in MAP_ID2CODE:
                                           codes.append(MAP_ID2CODE[mid])
 
-              # säubern & upper
               return [str(c).strip().upper() for c in codes if str(c).strip()]
+
+          # --- schnelles Counting (Prefer: count=exact)
+          def _count(url):
+              hdr = {
+                  "apikey": sb_key,
+                  "Authorization": f"Bearer {sb_key}",
+                  "Prefer": "count=exact",
+                  "Range-Unit": "items",
+                  "Range": "0-0"
+              }
+              req = urllib.request.Request(url, headers=hdr)
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  cr = r.headers.get("content-range", "*/0")
+              try:
+                  return int(cr.split("/")[-1])
+              except Exception:
+                  return 0
+
+          # Aktivität (letzte N Monate): Orders (mit MarketplaceId) oder Fees (mit Code)
+          def has_activity(sb_url, tenant, code, months=12):
+              y0 = (date.today().replace(day=1) - timedelta(days=months*30)).year
+              mid = CODE2ID.get(code)
+
+              if mid:
+                  uo = (f"{sb_url}/rest/v1/amazon_orders"
+                        f"?tenant_id=eq.{tenant}&marketplace=eq.{mid}&period_year=gte.{y0}"
+                        f"&select=amazon_order_id")
+                  if _count(uo) > 0:
+                      return True
+
+              uf = (f"{sb_url}/rest/v1/amazon_fees"
+                    f"?tenant_id=eq.{tenant}&marketplace=eq.{code}&period_year=gte.{y0}"
+                    f"&select=amazon_order_id")
+              return _count(uf) > 0
 
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
@@ -123,6 +161,9 @@ jobs:
               if code in FE: return "fe"
               return "eu"
 
+          force = set([c.strip().upper() for c in (os.getenv("OVERRIDE_CODES") or "").split(",") if c.strip()]) or None
+          months = int(os.getenv("ACTIVITY_MONTHS") or 12)
+
           include = []
           for row in rows:
               tenant = (row.get("tenant_id") or "").strip()
@@ -130,9 +171,23 @@ jobs:
                   continue
               if filt_tenants != ["ALL"] and tenant not in filt_tenants:
                   continue
+
               seller_id = (row.get("seller_id") or "").strip()
               codes = extract_codes(row.get("marketplaces")) or ["DE"]
-              for code in sorted(set(codes)):
+
+              if force is not None:
+                  codes = [c for c in codes if c in force]
+
+              active = []
+              for c in sorted(set(codes)):
+                  try:
+                      if has_activity(sb_url, tenant, c, months=months):
+                          active.append(c)
+                  except Exception:
+                      # im Zweifel nicht rausfiltern
+                      active.append(c)
+
+              for code in active:
                   include.append({
                       "tenant": tenant,
                       "marketplace": code,
@@ -141,7 +196,7 @@ jobs:
                   })
 
           if not include:
-              raise SystemExit("No matrix from amazon_connections")
+              raise SystemExit("No matrix from amazon_connections (after activity filter)")
 
           out = {"include": include}
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -164,9 +219,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
 
       - name: Install deps
         run: |
@@ -253,7 +308,7 @@ jobs:
           REGION:        ${{ matrix.region }}
         run: |
           set -e
-          python - <<'PY'
+          python - << 'PY'
           import os, json, urllib.request, sys
           sb = os.environ["SUPABASE_URL"].rstrip("/")
           key = os.environ["SRK"]
@@ -287,7 +342,7 @@ jobs:
           SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
           SRK:               ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python - <<'PY'
+          python - << 'PY'
           import os, sys
           need = ["SP_API_REFRESH_TOKEN","LWA_CLIENT_ID","LWA_CLIENT_SECRET","SUPABASE_URL","SRK"]
           miss = [k for k in need if not os.getenv(k)]
@@ -312,7 +367,7 @@ jobs:
           ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
           ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
           LOCAL_TZ:    ${{ vars.LOCAL_TZ && vars.LOCAL_TZ || 'Europe/Istanbul' }}
-          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES && vars.SPAPI_MAX_TOKEN_PAGES || '200' }}
+          SPAPI_MAX_TOKEN_PAGES: ${{ vars.SPAPI_MAX_TOKEN_PAGES && vars.SPAPI_MAX_TOKEN_PAGES || '500' }}
         run: |
           python "${{ steps.detect.outputs.fee_script }}"
 
@@ -324,7 +379,7 @@ jobs:
           SUPABASE_URL:      ${{ secrets.SUPABASE_URL }}
           SRK:               ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python - <<'PY'
+          python - << 'PY'
           import os, sys
           need = ["SP_API_REFRESH_TOKEN","LWA_CLIENT_ID","LWA_CLIENT_SECRET","SUPABASE_URL","SRK"]
           miss = [k for k in need if not os.getenv(k)]
