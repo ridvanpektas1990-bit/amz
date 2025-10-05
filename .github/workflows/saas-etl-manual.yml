@@ -9,6 +9,10 @@ on:
       which:         { description: "fees|orders|beides", required: false, default: "beides" }
       max_parallel:  { description: "1..20", required: false, default: "4" }
 
+
+permissions:
+  contents: read
+
 jobs:
   call-reusable:
     uses: ./.github/workflows/_saas-etl.yml
