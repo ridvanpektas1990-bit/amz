@@ -3,16 +3,39 @@ name: SaaS ETL (reusable)
 on:
   workflow_call:
     inputs:
-      period_year:   { type: string, required: false, description: "YYYY (leer = Vormonat)" }
-      period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
-      tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
-      which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
+      period_year:   { type: string, required: false }
+      period_month:  { type: string, required: false }
+      tenants:       { type: string, required: false, default: "ALL" }
+      which:         { type: string, required: false, default: "beides" }
       max_parallel:  { type: number, required: false, default: 8 }
     secrets:
       SUPABASE_URL:              { required: true }
       SUPABASE_SERVICE_ROLE_KEY: { required: true }
       LWA_CLIENT_ID:             { required: true }
       LWA_CLIENT_SECRET:         { required: true }
+
+  workflow_dispatch:
+    inputs:
+      period_year:
+        description: "YYYY (leer = Vormonat)"
+        required: false
+      period_month:
+        description: "M oder MM (leer = Vormonat)"
+        required: false
+      tenants:
+        description: "CSV oder ALL"
+        required: false
+        default: "ALL"
+      which:
+        description: "fees | orders | beides"
+        type: choice
+        options: [beides, fees, orders]
+        default: beides
+      max_parallel:
+        description: "Max parallel laufende Jobs"
+        required: false
+        default: 8
+
 
 jobs:
   prep-matrix:
