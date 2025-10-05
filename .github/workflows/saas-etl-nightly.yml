@@ -1,0 +1,43 @@
+name: SaaS ETL (nightly)
+
+on:
+  # Täglich um 02:12 UTC. Passe die Uhrzeit bei Bedarf an.
+  schedule:
+    - cron: "12 2 * * *"
+  # Optional: Manuell aus dem Actions-Tab startbar
+  workflow_dispatch: {}
+
+jobs:
+  # Ermittelt das aktuelle Jahr/Monat (M0) für den heutigen Lauf
+  prep-now:
+    runs-on: ubuntu-latest
+    outputs:
+      year: ${{ steps.now.outputs.year }}
+      month: ${{ steps.now.outputs.month }}
+    steps:
+      - id: now
+        shell: bash
+        run: |
+          echo "year=$(date -u +%Y)" >> "$GITHUB_OUTPUT"
+          echo "month=$(date -u +%-m)" >> "$GITHUB_OUTPUT"
+
+  # M-1: ruft den wiederverwendbaren Workflow OHNE period_* auf → default = Vormonat
+  etl-last-month:
+    uses: ./.github/workflows/_saas-etl.yml
+    secrets: inherit
+    with:
+      tenants: "ALL"            # oder CSV "TENANT1,TENANT2"
+      which: "beides"           # "fees"|"orders"|"beides"
+      max_parallel: 6           # parallel laufende Tenants
+
+  # M0: aktueller Monat (holt die Outputs aus prep-now)
+  etl-current-month:
+    needs: prep-now
+    uses: ./.github/workflows/_saas-etl.yml
+    secrets: inherit
+    with:
+      period_year:  ${{ needs.prep-now.outputs.year }}
+      period_month: ${{ needs.prep-now.outputs.month }}
+      tenants: "ALL"
+      which: "beides"
+      max_parallel: 6
