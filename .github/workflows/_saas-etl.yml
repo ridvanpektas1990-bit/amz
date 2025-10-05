@@ -24,6 +24,7 @@ jobs:
     steps:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
+
       - id: mk
         env:
           IN_PERIOD_YEAR:  ${{ inputs.period_year }}
@@ -37,7 +38,11 @@ jobs:
           from datetime import date, timedelta
 
           def last_month():
-              t=date.today(); first=t.replace(day=1); prev=first-timedelta(days=1); return prev.year, prev.month
+              t = date.today()
+              first = t.replace(day=1)
+              prev = first - timedelta(days=1)
+              return prev.year, prev.month
+
           yy = int(os.getenv("IN_PERIOD_YEAR") or 0) or last_month()[0]
           mm = int(os.getenv("IN_PERIOD_MONTH") or 0) or last_month()[1]
 
@@ -47,11 +52,18 @@ jobs:
           sb_key = os.getenv("SUPABASE_KEY")
           url = f"{sb_url}/rest/v1/amazon_connections?select=tenant_id,region,refresh_token,seller_id,marketplaces"
           req = urllib.request.Request(url, headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"})
-          rows = []
           with urllib.request.urlopen(req, timeout=30) as r:
               rows = json.loads(r.read().decode("utf-8"))
 
-          # Helper: marketplaces-json zu Codes
+          # --- marketplaces -> Codes extrahieren (tolerant) -------------------
+          MAP_ID2CODE = {
+              "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
+              "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
+              "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
+              "A33AVAJ2PDY3EV":"TR","A39IBJ37TRP1C6":"AE","A2Q3Y263D00KWC":"SA",
+              "A2VIGQ35RCS4UG":"EG"
+          }
+
           def extract_codes(marketplaces):
               codes = []
               if marketplaces is None:
@@ -61,45 +73,32 @@ jobs:
                       if isinstance(it, str):
                           codes.append(it)
                       elif isinstance(it, dict):
-                          # versuche gängige Felder
                           for k in ("code","marketplace","marketplace_code"):
-                              if k in it and it[k]:
+                              if it.get(k):
                                   codes.append(str(it[k]))
                                   break
                           else:
-                              # id → heuristik auf EU codes falls enthalten
                               mid = str(it.get("id") or it.get("marketplaceId") or "")
-                              MAP_ID2CODE = {
-                                "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
-                                "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
-                                "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
-                                "A33AVAJ2PDY3EV":"TR"
-                              }
-                              if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
+                              if mid in MAP_ID2CODE:
+                                  codes.append(MAP_ID2CODE[mid])
               elif isinstance(marketplaces, dict):
-                  # z.B. { "codes": ["DE","FR"] }
                   for k in ("codes","list","marketplaces"):
                       v = marketplaces.get(k)
                       if isinstance(v, list):
                           for x in v:
-                              if isinstance(x, str): codes.append(x)
+                              if isinstance(x, str):
+                                  codes.append(x)
                               elif isinstance(x, dict):
                                   for kk in ("code","marketplace","marketplace_code"):
-                                      if kk in x and x[kk]: codes.append(str(x[kk]))
+                                      if x.get(kk):
+                                          codes.append(str(x[kk]))
                                   mid = str(x.get("id") or x.get("marketplaceId") or "")
-                                  MAP_ID2CODE = {
-                                    "A1PA6795UKMFR9":"DE","A13V1IB3VIYZZH":"FR","APJ6JRA9NG5V4":"IT",
-                                    "A1RKKUPIHCS9HS":"ES","A1F83G8C2ARO7P":"GB","A1805IZSGTT6HS":"NL",
-                                    "A2NODRKZP88ZB9":"SE","A1C3SOZRARQ6R3":"PL","AMEN7PMS3EDWL":"BE",
-                                    "A33AVAJ2PDY3EV":"TR"
-                                  }
-                                  if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
-              return [c.strip().upper() for c in codes if str(c).strip()]
+                                  if mid in MAP_ID2CODE:
+                                      codes.append(MAP_ID2CODE[mid])
+              return [str(c).strip().upper() for c in codes if str(c).strip()]
+          # --------------------------------------------------------------------
 
-              # Ende helper
-
-          # Map Marketplace → Region (für Token-Auswahl)
-          EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR"}
+          EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
           FE = {"JP","AU","SG"}
           def mp_region(code):
@@ -111,18 +110,21 @@ jobs:
           include = []
           for row in rows:
               tenant = (row.get("tenant_id") or "").strip()
-              if not tenant: continue
-              if filt_tenants!=["ALL"] and tenant not in filt_tenants: 
+              if not tenant:
+                  continue
+              if filt_tenants != ["ALL"] and tenant not in filt_tenants:
                   continue
               seller_id = (row.get("seller_id") or "").strip()
-              region = (row.get("region") or "eu").strip().lower()
               codes = extract_codes(row.get("marketplaces"))
               if not codes:
-                  codes = ["DE"]  # Default
+                  codes = ["DE"]  # Default wenn NULL
               for code in sorted(set(codes)):
-                  # Region prüfen: wenn nicht passend, überschreiben wir Region anhand des Codes
-                  r = mp_region(code)
-                  include.append({"tenant": tenant, "marketplace": code, "region": r, "seller_id": seller_id})
+                  include.append({
+                      "tenant": tenant,
+                      "marketplace": code,
+                      "region": mp_region(code),
+                      "seller_id": seller_id
+                  })
 
           if not include:
               raise SystemExit("No matrix from amazon_connections")
@@ -145,47 +147,82 @@ jobs:
     strategy:
       max-parallel: ${{ inputs.max_parallel }}
       matrix: ${{ fromJSON(needs.prep-matrix.outputs.matrix) }}
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
+
       - name: Install deps
         run: |
           python -m pip install -U pip
           pip install -U python-amazon-sp-api supabase python-dotenv requests tzdata
 
+      - name: Show repo (top)
+        run: |
+          echo "PWD=$(pwd)"
+          find . -maxdepth 4 -type f | sed -n '1,400p'
+
       - name: Autodetect scripts
         id: detect
+        env:
+          FEE_HINT: ${{ vars.FEE_SCRIPT }}
+          ORDERS_HINT: ${{ vars.ORDERS_SCRIPT }}
         run: |
           set -e
-          FEE=$(python - <<'PY'
-          import pathlib, sys
-          root=pathlib.Path("."); c=[]
-          for n in ["AmzT_Fee.py","libs/finance/AmzT_Fee.py","finance/AmzT_Fee.py"]:
-              p=root/n; 
-              if p.exists(): c.append(p)
-          if not c:
-              for p in root.rglob("AmzT_Fee.py"): c.append(p)
-          if not c: sys.exit("Could not find AmzT_Fee.py")
-          print(sorted(c,key=lambda p: len(str(p)))[0])
-          PY
+          python - <<'PY'
+          import os, sys, pathlib
+          root = pathlib.Path(".")
+
+          def first_existing(hint, patterns, must_have=None):
+              # 1) fester Hint
+              if hint:
+                  p = root / hint
+                  if p.exists():
+                      return str(p)
+              # 2) Suche per Muster
+              cands = []
+              for pat in patterns:
+                  cands += list(root.rglob(pat))
+              # 3) optional: inhaltlicher Check
+              if must_have:
+                  filtered = []
+                  for p in cands:
+                      try:
+                          txt = p.read_text(errors="ignore")
+                      except Exception:
+                          continue
+                      if any(m in txt for m in must_have):
+                          filtered.append(p)
+                  if filtered:
+                      cands = filtered
+              # 4) beste Wahl (kürzester Pfad)
+              if not cands:
+                  return ""
+              return str(sorted(cands, key=lambda p: len(str(p)))[0])
+
+          fee = first_existing(
+              os.getenv("FEE_HINT",""),
+              ["AmzT_Fee.py", "**/*AmzT*Fee*.py", "**/*fee*.py"],
+              must_have=["Finances(", "list_financial_event_groups"]
           )
-          ORD=$(python - <<'PY'
-          import pathlib, sys
-          root=pathlib.Path("."); c=[]
-          for n in ["AmzT_Sales.py","libs/orders/AmzT_Sales.py","orders/AmzT_Sales.py","orders_month_supabase.py","AmzT_Orders.py"]:
-              p=root/n; 
-              if p.exists(): c.append(p)
-          if not c:
-              for p in root.rglob("AmzT_Sales.py"): c.append(p)
-          if not c:
-              for p in root.rglob("orders_month_supabase.py"): c.append(p)
-          if not c: sys.exit("Could not find AmzT_Sales.py / orders_month_supabase.py")
-          print(sorted(c,key=lambda p: len(str(p)))[0])
-          PY
+          orders = first_existing(
+              os.getenv("ORDERS_HINT",""),
+              ["AmzT_Sales.py", "orders_month_supabase.py", "**/*AmzT*Sales*.py", "**/*orders*.py"],
+              must_have=["Orders(", "get_orders"]
           )
-          echo "fee_script=$FEE"   >> $GITHUB_OUTPUT
-          echo "orders_script=$ORD" >> $GITHUB_OUTPUT
+
+          if not fee:
+              sys.exit("Could not find fee script – set repo variable FEE_SCRIPT to relative path, e.g. libs/finance/AmzT_Fee.py")
+          if not orders:
+              sys.exit("Could not find orders script – set repo variable ORDERS_SCRIPT to relative path, e.g. libs/orders/AmzT_Sales.py")
+
+          print("FEE:", fee)
+          print("ORDERS:", orders)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"fee_script={fee}\n")
+              f.write(f"orders_script={orders}\n")
+          PY
 
       - name: Fetch tenant refresh_token (region-aware)
         id: token
@@ -228,7 +265,6 @@ jobs:
           LWA_APP_ID:        ${{ secrets.LWA_CLIENT_ID }}
           LWA_CLIENT_ID:     ${{ secrets.LWA_CLIENT_ID }}
           LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
-          # Tenant-spezifisches Token via GITHUB_ENV
           # Supabase
           SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
