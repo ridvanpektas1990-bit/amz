@@ -7,6 +7,10 @@ on:
   # Optional: Manuell aus dem Actions-Tab startbar
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   # Ermittelt das aktuelle Jahr/Monat (M0) für den heutigen Lauf
   prep-now:
