@@ -7,7 +7,8 @@ on:
       period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
       tenants:       { type: string, required: false, default: "ALL", description: "CSV (filter) oder ALL" }
       which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
-      max_parallel:  { type: number, required: false, default: 8 }
+      # Wichtig: als STRING, damit aufrufende Workflows (workflow_dispatch) sauber übergeben können
+      max_parallel:  { type: string, required: false, default: "8" }
     secrets:
       SUPABASE_URL:              { required: true }
       SUPABASE_SERVICE_ROLE_KEY: { required: true }
@@ -74,28 +75,24 @@ jobs:
                       elif isinstance(it, dict):
                           for k in ("code","marketplace","marketplace_code"):
                               if it.get(k):
-                                  codes.append(str(it[k]))
-                                  break
+                                  codes.append(str(it[k])); break
                           else:
                               mid = str(it.get("id") or it.get("marketplaceId") or "")
-                              if mid in MAP_ID2CODE:
-                                  codes.append(MAP_ID2CODE[mid])
+                              if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
               elif isinstance(marketplaces, dict):
                   for k in ("codes","list","marketplaces"):
                       v = marketplaces.get(k)
                       if isinstance(v, list):
                           for x in v:
-                              if isinstance(x, str):
-                                  codes.append(x)
+                              if isinstance(x, str): codes.append(x)
                               elif isinstance(x, dict):
                                   for kk in ("code","marketplace","marketplace_code"):
-                                      if x.get(kk):
-                                          codes.append(str(x[kk]))
+                                      if x.get(kk): codes.append(str(x[kk]))
                                   mid = str(x.get("id") or x.get("marketplaceId") or "")
-                                  if mid in MAP_ID2CODE:
-                                      codes.append(MAP_ID2CODE[mid])
+                                  if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
               return [str(c).strip().upper() for c in codes if str(c).strip()]
 
+          # Regions-Mapping (SP-API Endpoints)
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
           FE = {"JP","AU","SG"}
@@ -108,14 +105,11 @@ jobs:
           include = []
           for row in rows:
               tenant = (row.get("tenant_id") or "").strip()
-              if not tenant:
-                  continue
+              if not tenant: continue
               if filt_tenants != ["ALL"] and tenant not in filt_tenants:
                   continue
               seller_id = (row.get("seller_id") or "").strip()
-              codes = extract_codes(row.get("marketplaces"))
-              if not codes:
-                  codes = ["DE"]
+              codes = extract_codes(row.get("marketplaces")) or ["DE"]
               for code in sorted(set(codes)):
                   include.append({
                       "tenant": tenant,
@@ -143,6 +137,7 @@ jobs:
       group: saas-${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}-${{ matrix.tenant }}-${{ matrix.marketplace }}
       cancel-in-progress: false
     strategy:
+      # cast von String → Zahl
       max-parallel: ${{ fromJSON(inputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.prep-matrix.outputs.matrix) }}
 
@@ -182,8 +177,10 @@ jobs:
               if must_have:
                   filtered = []
                   for p in cands:
-                      try: txt = p.read_text(errors="ignore")
-                      except Exception: continue
+                      try:
+                          txt = p.read_text(errors="ignore")
+                      except Exception:
+                          continue
                       if any(m in txt for m in must_have):
                           filtered.append(p)
                   if filtered:
