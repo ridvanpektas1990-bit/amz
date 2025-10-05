@@ -94,7 +94,8 @@ if not SUPABASE_SERVICE_ROLE_KEY:
 FEES_TABLE       = os.getenv("SUPABASE_FEES_TABLE", "amazon_fees")
 FEES_ON_CONFLICT = os.getenv(
     "SUPABASE_FEES_ON_CONFLICT",
-    "tenant_id,marketplace,amazon_order_id,seller_sku,period_year,period_month,currency,transaction_phase",
+    # exakt wie dein PK in amazon_fees (ohne tenant_id):
+    "amazon_order_id,seller_sku,marketplace,period_year,period_month,currency,transaction_phase",
 )
 BATCH_SIZE = int(os.getenv("SUPABASE_BATCH_SIZE", "500"))
 
