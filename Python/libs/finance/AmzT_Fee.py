@@ -3,7 +3,7 @@
 
 # -*- coding: utf-8 -*-
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dtime  # ← dtime importiert
 from dotenv import load_dotenv
 from decimal import Decimal, InvalidOperation
 from typing import Dict, Any, List, Optional, Tuple
@@ -954,7 +954,8 @@ def push_fee_lines(all_rows: List[List[Any]], *, marketplace: str):
             order_id or "", sku or "", asin or "",
             gid or "", source or "",
             marketplace or "",
-            str(ORDERS_YEAR), str(ORDERS_MONTH),
+            str(ordERS_YEAR) if False else str(ORDERS_YEAR),  # keep original
+            str(ORDERS_MONTH),
             TENANT_ID,
         ])
         line_hash = md5(key_str)
@@ -1025,6 +1026,22 @@ def run():
     print(f"Monatsfenster (local): {month_start_local.isoformat()} → {month_next_local.isoformat()}")
     print(f"API (UTC) Fenster    : {iso_z(after_utc)} → {iso_z(before_utc)}")
 
+    # --- CLAMP: 'before_utc' auf maximal gestern 23:59:59 LOCAL_TZ (und nie in die Zukunft) ---
+    def end_of_yesterday_utc(tz: ZoneInfo) -> datetime:
+        today_local = datetime.now(tz).date()
+        today_local_midnight = datetime.combine(today_local, dtime(0, 0), tzinfo=tz)
+        y_end_local = today_local_midnight - timedelta(seconds=1)
+        return y_end_local.astimezone(timezone.utc)
+
+    now_utc = datetime.now(timezone.utc) - timedelta(minutes=5)  # SP-API verlangt „nicht in der Zukunft“
+    yesterday_end_utc = end_of_yesterday_utc(TZ)
+
+    safe_before_utc = min(before_utc, yesterday_end_utc, now_utc)
+    if safe_before_utc <= after_utc:
+        safe_before_utc = min(now_utc, after_utc + timedelta(seconds=1))
+
+    print(f"API (UTC) Fenster (geklemmt): {iso_z(after_utc)} → {iso_z(safe_before_utc)}")
+
     # --- Groups holen --------------------------------------------------------
     def fetch_groups(fin: Finances, after: str, before: str) -> List[Dict[str, Any]]:
         res = with_throttle_retry(
@@ -1083,7 +1100,8 @@ def run():
 
         return events
 
-    groups = fetch_groups(fin, iso_z(after_utc), iso_z(before_utc))
+    # !!! hier mit 'safe_before_utc' statt 'before_utc'
+    groups = fetch_groups(fin, iso_z(after_utc), iso_z(safe_before_utc))
     if not groups:
         print("Keine FinancialEventGroups im Fenster gefunden.")
         return
