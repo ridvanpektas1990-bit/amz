@@ -1,0 +1,41 @@
+name: etl-retry
+on:
+  repository_dispatch:
+    types: [etl-retry]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Optional delay
+        run: |
+          DELAY="${{ github.event.client_payload.delay_seconds || 900 }}"
+          echo "Sleeping ${DELAY}s before retry…"
+          sleep "${DELAY}"
+
+      - name: Dispatch manual workflow (saas-etl-manual.yml)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          Y="${{ github.event.client_payload.year }}"
+          M="${{ github.event.client_payload.month }}"
+          TENANT="${{ github.event.client_payload.tenant }}"
+          WHICH="${{ github.event.client_payload.which || 'orders' }}"
+
+          echo "Re-dispatch: year=${Y}, month=${M}, tenant=${TENANT}, which=${WHICH}"
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/saas-etl-manual.yml/dispatches \
+            -d "$(jq -n \
+                  --arg y "$Y" \
+                  --arg m "$M" \
+                  --arg t "$TENANT" \
+                  --arg w "$WHICH" \
+                  '{ref:"main", inputs:{period_year:$y, period_month:$m, tenants:$t, which:$w}}')"
