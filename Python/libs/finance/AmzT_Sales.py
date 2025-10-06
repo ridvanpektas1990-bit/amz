@@ -1,9 +1,9 @@
-# AmzT_Sales.py  (optimierte Fassung)
+# AmzT_Sales.py  (optimierte Fassung, mit CLAMP auf gestern 23:59:59 LOCAL_TZ)
 # pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
 # optional für XLSX: pandas openpyxl
 
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dtime  # ← dtime hinzugefügt
 from dotenv import load_dotenv
 import os, time, random, csv, re, sys
 from typing import Tuple, List, Dict, Any, Optional
@@ -257,10 +257,26 @@ def main():
     after_utc  = after_local.astimezone(timezone.utc)
     before_utc = before_local.astimezone(timezone.utc)
 
+    # --- CLAMP: 'before_utc' auf maximal gestern 23:59:59 LOCAL_TZ und nie in die Zukunft ---
+    def end_of_yesterday_utc(tz: ZoneInfo) -> datetime:
+        today_local = datetime.now(tz).date()
+        # gestern 23:59:59 local
+        yesterday_end_local = datetime.combine(today_local, dtime(0, 0), tzinfo=tz) - timedelta(seconds=1)
+        return yesterday_end_local.astimezone(timezone.utc)
+
+    # 2 Minuten Puffer gegen "no later than 2 minutes from now"
+    now_utc_safe = datetime.now(timezone.utc) - timedelta(minutes=2)
+    y_end_utc    = end_of_yesterday_utc(TZ)
+
+    safe_before_utc = min(before_utc, y_end_utc, now_utc_safe)
+    if safe_before_utc <= after_utc:
+        safe_before_utc = min(now_utc_safe, after_utc + timedelta(seconds=1))
+
     print(f"\n=== Orders Import | {MP_CODE} | TZ={LOCAL_TZ} ===")
     print(f"Tenant         : {TENANT_ID}")
     print(f"Period (local) : {m_start_local.date()} → {m_next_local.date()} (+/-1d padded)")
     print(f"API window UTC : {iso_z(after_utc)} → {iso_z(before_utc)}")
+    print(f"API window UTC (clamped): {iso_z(after_utc)} → {iso_z(safe_before_utc)}")  # ← neu
     print(f"DateMode       : {DATE_MODE} | Pace {PACE}s | Timeout {REQ_TIMEOUT}s | PerPage {MAX_RESULTS_PER_PAGE}")
     print(f"Supabase table : {SUPABASE_ORDERS_TABLE} ON CONFLICT ({SUPABASE_ON_CONFLICT})")
     print(f"MarketplaceId  : {marketplace_id}")
@@ -270,10 +286,10 @@ def main():
     params = dict(MarketplaceIds=[marketplace_id], MaxResultsPerPage=MAX_RESULTS_PER_PAGE)
     if DATE_MODE == "updated":
         params["LastUpdatedAfter"]  = iso_z(after_utc)
-        params["LastUpdatedBefore"] = iso_z(before_utc)
+        params["LastUpdatedBefore"] = iso_z(safe_before_utc)  # ← geklemmt
     else:
         params["CreatedAfter"]  = iso_z(after_utc)
-        params["CreatedBefore"] = iso_z(before_utc)
+        params["CreatedBefore"] = iso_z(safe_before_utc)      # ← geklemmt
 
     try:
         res = with_throttle_retry(orders_api.get_orders, **params)
