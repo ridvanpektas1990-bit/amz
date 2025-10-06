@@ -11,6 +11,13 @@ jobs:
   retry:
     runs-on: ubuntu-latest
     steps:
+      - name: Ensure jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
       - name: Optional delay
         run: |
           DELAY="${{ github.event.client_payload.delay_seconds || 900 }}"
@@ -26,7 +33,13 @@ jobs:
           Y="${{ github.event.client_payload.year }}"
           M="${{ github.event.client_payload.month }}"
           TENANT="${{ github.event.client_payload.tenant }}"
-          WHICH="${{ github.event.client_payload.which || 'orders' }}"
+          # Default jetzt: beides (Orders + Fees)
+          WHICH="${{ github.event.client_payload.which || 'beides' }}"
+
+          if [ -z "$Y" ] || [ -z "$M" ] || [ -z "$TENANT" ]; then
+            echo "::error::Missing required payload: year/month/tenant"
+            exit 1
+          fi
 
           echo "Re-dispatch: year=${Y}, month=${M}, tenant=${TENANT}, which=${WHICH}"
           curl -sS -X POST \
