@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   prep-matrix:
@@ -231,6 +232,13 @@ jobs:
           python -m pip install -U pip
           pip install -U python-amazon-sp-api supabase python-dotenv requests tzdata
 
+      - name: Ensure jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
       - name: Show matrix item
         run: |
           echo "TENANT=${{ matrix.tenant }}"
@@ -410,3 +418,59 @@ jobs:
           LOCAL_TZ:    ${{ vars.LOCAL_TZ && vars.LOCAL_TZ || 'Europe/Istanbul' }}
         run: |
           python "${{ steps.detect.outputs.orders_script }}"
+
+      # === Auto-Retry bei Fehlschlag (Orders + Fees) ===
+      - name: Requeue on failure + log note into etl_runs
+        if: failure()
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TENANT_ID: ${{ matrix.tenant }}
+          MP: ${{ matrix.marketplace }}
+          YY: ${{ needs.prep-matrix.outputs.year }}
+          MM: ${{ needs.prep-matrix.outputs.month }}
+          # Delay für den nächsten Versuch (Sekunden)
+          RETRY_DELAY_SECONDS: "1800"
+        run: |
+          set -e
+
+          # 1) Laufzeit für „geplanter Neuversuch“ berechnen (UTC-ISO)
+          NEXT_TS="$(date -u -d "@$(( $(date +%s) + ${RETRY_DELAY_SECONDS} ))" +"%Y-%m-%dT%H:%M:%SZ")"
+          NOTE="Auto-Retry (Orders+Fees) geplant um ${NEXT_TS} UTC (in ${RETRY_DELAY_SECONDS}s). Grund: Workflow-Failure."
+
+          echo "==> Writing note into etl_runs…"
+          curl -sS -X POST "${SUPABASE_URL%/}/rest/v1/etl_runs" \
+            -H "apikey: ${SRK}" \
+            -H "Authorization: Bearer ${SRK}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+                  --arg t  "$TENANT_ID" \
+                  --arg mp "$MP" \
+                  --arg y  "$YY" \
+                  --arg m  "$MM" \
+                  --arg note "$NOTE" \
+                  '{
+                      tenant_id: $t,
+                      marketplace: $mp,
+                      period_year: ($y|tonumber),
+                      period_month: ($m|tonumber),
+                      status: "error",
+                      run_log: $note
+                    }')"
+
+          echo "==> Fire repository_dispatch: etl-retry (beides)…"
+          OWNER="${{ github.repository_owner }}"
+          REPO="$(echo "${{ github.repository }}" | cut -d'/' -f2)"
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}/dispatches" \
+            -d "$(jq -n \
+                  --arg t   "$TENANT_ID" \
+                  --arg y   "$YY" \
+                  --arg m   "$MM" \
+                  --argjson d ${RETRY_DELAY_SECONDS} \
+                  '{event_type:"etl-retry", client_payload:{tenant:$t, year:($y|tonumber), month:($m|tonumber), which:"beides", delay_seconds:$d}}')"
+
+          echo "Requeue (Orders+Fees) scheduled."
