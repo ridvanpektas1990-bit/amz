@@ -1,40 +1,197 @@
-name: SaaS ETL (manual run)
+name: SaaS ETL (reusable)
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       period_year:
-        description: "YYYY (leer = Vormonat)"
+        type: string
         required: false
         default: ""
       period_month:
-        description: "M oder MM (leer = Vormonat)"
+        type: string
         required: false
         default: ""
       tenants:
-        description: "CSV von tenant_id(s) oder ALL (z.B. AO5...,ABC...,DEF...)"
+        # CSV von tenant_id(s) oder "ALL"
+        type: string
         required: true
-        default: "ALL"
       which:
-        description: "fees | orders | beides"
+        # fees | orders | beides
+        type: string
         required: true
         default: "orders"
       max_parallel:
-        description: "1..20"
+        type: string
         required: false
         default: "4"
+    secrets:
+      SUPABASE_URL:
+        required: true
+      SUPABASE_SERVICE_ROLE_KEY:
+        required: true
+      LWA_APP_ID:
+        required: true
+      LWA_CLIENT_SECRET:
+        required: true
+      SP_API_REFRESH_TOKEN:
+        required: true
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
-  run:
-    uses: ./.github/workflows/_saas-etl.yml
-    secrets: inherit
-    with:
-      period_year:   ${{ inputs.period_year }}
-      period_month:  ${{ inputs.period_month }}
-      tenants:       ${{ inputs.tenants }}
-      which:         ${{ inputs.which }}
-      max_parallel:  ${{ inputs.max_parallel }}
+  make-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      count:  ${{ steps.mk.outputs.count }}
+      year:   ${{ steps.per.outputs.year }}
+      month:  ${{ steps.per.outputs.month }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute period defaults (fallback = Vormonat)
+        id: per
+        env:
+          IN_YEAR:  ${{ inputs.period_year }}
+          IN_MONTH: ${{ inputs.period_month }}
+        run: |
+          YEAR="$IN_YEAR"
+          MONTH="$IN_MONTH"
+          if [ -z "$YEAR" ] || [ -z "$MONTH" ]; then
+            PREV_Y=$(date -u -d 'last month' +%Y)
+            PREV_M=$(date -u -d 'last month' +%-m)
+            [ -z "$YEAR" ] && YEAR="$PREV_Y"
+            [ -z "$MONTH" ] && MONTH="$PREV_M"
+          fi
+          echo "year=$YEAR"  >> "$GITHUB_OUTPUT"
+          echo "month=$MONTH" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps for matrix build
+        run: pip install -q supabase
+
+      - name: Build dynamic matrix from Supabase
+        id: mk
+        env:
+          SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INPUT_TENANTS:              ${{ inputs.tenants }}
+          ACTIVITY_SINCE_HOURS:       720   # 30 Tage; bei Bedarf anpassen/entfernen
+        run: |
+          python - <<'PY'
+          import os, json, sys
+          from datetime import datetime, timedelta, timezone
+          from supabase import create_client
+
+          url = os.environ["SUPABASE_URL"]
+          key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+          tenants_in = (os.environ.get("INPUT_TENANTS") or "ALL").strip()
+          hours = int(os.environ.get("ACTIVITY_SINCE_HOURS","720"))
+          since_iso = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+          supa = create_client(url, key)
+
+          # Robust: wir holen ALLE und filtern in Python (vermeidet Schema-Mismatches)
+          rows = supa.table("amazon_connections").select("*").execute().data or []
+
+          # Filter: tenants
+          if tenants_in.upper() != "ALL":
+            wanted = {t.strip() for t in tenants_in.split(",") if t.strip()}
+            rows = [r for r in rows if str(r.get("tenant_id","")).strip() in wanted]
+
+          # Filter: is_active (fallback: wenn Spalte fehlt -> ignoriere)
+          rows = [r for r in rows if r.get("is_active", True) in (True, "true", 1)]
+
+          # Filter: Aktivität (fallback: nutze updated_at, wenn last_activity_at fehlt)
+          def active_enough(r):
+            v = r.get("last_activity_at") or r.get("updated_at")
+            if not v: return True
+            try:
+              dt = datetime.fromisoformat(str(v).replace("Z","+00:00"))
+            except Exception:
+              return True
+            return dt >= datetime.fromisoformat(since_iso)
+          rows = [r for r in rows if active_enough(r)]
+
+          # Matrix-Felder bauen (Fallbacks erlauben)
+          matrix = []
+          for r in rows:
+            mp = (r.get("marketplace") or "DE").strip().upper()
+            tenant = (r.get("tenant_id") or "default").strip()
+            # falls du pro Connection weitere Felder brauchst, hier ergänzen:
+            matrix.append({
+              "marketplace": mp,
+              "tenant_id": tenant,
+              "seller_id": r.get("seller_id"),
+            })
+
+          out = {
+            "matrix": json.dumps(matrix, separators=(",",":")),
+            "count":  str(len(matrix)),
+          }
+          print(f"Found {out['count']} active connections")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            for k,v in out.items():
+              f.write(f"{k}={v}\n")
+
+          # WICHTIG: nie mit Fehler beenden, wenn Matrix leer ist
+          sys.exit(0)
+          PY
+
+  fanout:
+    needs: [make-matrix]
+    if: ${{ needs.make-matrix.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        include: ${{ fromJSON(needs.make-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install runtime deps
+        run: pip install -U python-amazon-sp-api python-dotenv supabase requests tzdata
+
+      # Setze gemeinsame ENVs für deine Skripte
+      - name: Run ETL
+        env:
+          # aus Matrix
+          MARKETPLACE:  ${{ matrix.marketplace }}
+          TENANT_ID:    ${{ matrix.tenant_id }}
+          # aus Perioden-Defaults
+          ORDERS_YEAR:  ${{ needs.make-matrix.outputs.year }}
+          ORDERS_MONTH: ${{ needs.make-matrix.outputs.month }}
+          # Secrets
+          SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LWA_APP_ID:                ${{ secrets.LWA_APP_ID }}
+          LWA_CLIENT_SECRET:         ${{ secrets.LWA_CLIENT_SECRET }}
+          SP_API_REFRESH_TOKEN:      ${{ secrets.SP_API_REFRESH_TOKEN }}
+        run: |
+          set -euo pipefail
+          WHICH="${{ inputs.which }}"
+          echo "Tenant=$TENANT_ID MP=$MARKETPLACE Period=$ORDERS_YEAR-$ORDERS_MONTH Which=$WHICH"
+
+          # 👉 Passen: Dateinamen deiner Skripte
+          if [ "$WHICH" = "fees" ] || [ "$WHICH" = "beides" ]; then
+            python fees.py
+          fi
+
+          if [ "$WHICH" = "orders" ] || [ "$WHICH" = "beides" ]; then
+            python orders.py
+          fi
+
+  noop-when-empty:
+    needs: [make-matrix]
+    if: ${{ needs.make-matrix.outputs.count == '0' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No active amazon_connections after filters → nothing to do."
