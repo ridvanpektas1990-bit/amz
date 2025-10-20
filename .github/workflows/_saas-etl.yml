@@ -25,6 +25,7 @@ jobs:
       matrix: ${{ steps.mk.outputs.matrix }}
       year:   ${{ steps.mk.outputs.year }}
       month:  ${{ steps.mk.outputs.month }}
+      count:  ${{ steps.mk.outputs.count }}
     steps:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
@@ -36,10 +37,12 @@ jobs:
           IN_TENANTS:      ${{ inputs.tenants }}
           SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:    ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Optional: Aktivitätsfenster in Monaten (Default 12)
+          # Optional: Aktivitätsfenster in Monaten (Default 12; "0" = deaktiviert)
           ACTIVITY_MONTHS: ${{ vars.ACTIVITY_MONTHS }}
-          # Optional: hart begrenzen (z.B. "DE,FR")
+          # Optional: harte Einschränkung (z.B. "DE,FR")
           OVERRIDE_CODES:  ${{ vars.OVERRIDE_CODES }}
+          # Optional: Grace-Periode in Tagen für neue Connections (Default 45)
+          NEW_CONN_GRACE_DAYS: ${{ vars.NEW_CONN_GRACE_DAYS }}
         run: |
           python - << 'PY'
           import os, json, urllib.request
@@ -55,14 +58,22 @@ jobs:
           mm = int(os.getenv("IN_PERIOD_MONTH") or 0) or last_month()[1]
 
           filt_tenants = [x.strip() for x in (os.getenv("IN_TENANTS") or "ALL").split(",") if x.strip()]
-          sb_url = os.getenv("SUPABASE_URL").rstrip("/")
-          sb_key = os.getenv("SUPABASE_KEY")
+          sb_url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+          sb_key = os.getenv("SUPABASE_KEY") or ""
 
-          # --- Verbindungen laden
-          url = f"{sb_url}/rest/v1/amazon_connections?select=tenant_id,region,refresh_token,seller_id,marketplaces"
-          req = urllib.request.Request(url, headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"})
-          with urllib.request.urlopen(req, timeout=30) as r:
-              rows = json.loads(r.read().decode("utf-8"))
+          def _req(url, headers):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=45) as r:
+                  return r.read().decode("utf-8"), r.headers
+
+          # --- Verbindungen laden (inkl. created_at für Grace-Periode)
+          url = f"{sb_url}/rest/v1/amazon_connections?select=tenant_id,region,refresh_token,seller_id,marketplaces,created_at"
+          rows = []
+          try:
+              txt, _ = _req(url, {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"})
+              rows = json.loads(txt)
+          except Exception as e:
+              print(f"::error::Failed to load amazon_connections: {e}")
 
           # Mapping IDs <-> Codes
           MAP_ID2CODE = {
@@ -75,52 +86,60 @@ jobs:
           }
           CODE2ID = {v:k for k,v in MAP_ID2CODE.items()}
 
-          def extract_codes(marketplaces):
-              # akzeptiert JSON (Liste/Objekte) oder CSV-String
-              if isinstance(marketplaces, str):
-                  s = marketplaces.strip()
-                  if s:
+          def multi_json_loads(val, max_depth=3):
+              """Entschachtelt doppelt/mehrfach serialisierte JSON-Strings."""
+              out = val
+              for _ in range(max_depth):
+                  if isinstance(out, str):
+                      s = out.strip()
                       try:
-                          marketplaces = json.loads(s)
+                          out = json.loads(s)
+                          continue
                       except Exception:
-                          if "," in s and s.replace(",", "").strip():
-                              return [c.strip().upper() for c in s.split(",") if c.strip()]
-                          marketplaces = None
+                          return val
+                  break
+              return out
 
+          def extract_codes(marketplaces):
+              # akzeptiert: doppelt encodierte Strings, JSON-Listen/Dicts, CSV "DE,FR" oder Einzelcode "DE"
+              m = marketplaces
+              if isinstance(m, str):
+                  m = multi_json_loads(m, max_depth=3)
               codes = []
-              if marketplaces is None:
-                  return codes
 
-              if isinstance(marketplaces, list):
-                  for it in marketplaces:
-                      if isinstance(it, str):
-                          codes.append(it)
+              if isinstance(m, list):
+                  for it in m:
+                      if isinstance(it, str) and it.strip():
+                          codes.append(it.strip().upper())
                       elif isinstance(it, dict):
                           c = it.get("code") or it.get("marketplace") or it.get("marketplace_code")
-                          if c:
-                              codes.append(str(c))
+                          if c: codes.append(str(c).strip().upper())
                           else:
-                              mid = str(it.get("id") or it.get("marketplaceId") or "")
-                              if mid in MAP_ID2CODE:
-                                  codes.append(MAP_ID2CODE[mid])
+                              mid = str(it.get("id") or it.get("marketplaceId") or "").strip()
+                              if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
 
-              elif isinstance(marketplaces, dict):
+              elif isinstance(m, dict):
                   for k in ("codes","list","marketplaces"):
-                      v = marketplaces.get(k)
+                      v = m.get(k)
                       if isinstance(v, list):
                           for x in v:
-                              if isinstance(x, str):
-                                  codes.append(x)
+                              if isinstance(x, str) and x.strip():
+                                  codes.append(x.strip().upper())
                               elif isinstance(x, dict):
                                   c = x.get("code") or x.get("marketplace") or x.get("marketplace_code")
-                                  if c:
-                                      codes.append(str(c))
+                                  if c: codes.append(str(c).strip().upper())
                                   else:
-                                      mid = str(x.get("id") or x.get("marketplaceId") or "")
-                                      if mid in MAP_ID2CODE:
-                                          codes.append(MAP_ID2CODE[mid])
+                                      mid = str(x.get("id") or x.get("marketplaceId") or "").strip()
+                                      if mid in MAP_ID2CODE: codes.append(MAP_ID2CODE[mid])
 
-              return [str(c).strip().upper() for c in codes if str(c).strip()]
+              elif isinstance(m, str) and m.strip():
+                  s = m.strip()
+                  if "," in s:
+                      codes += [c.strip().upper() for c in s.split(",") if c.strip()]
+                  else:
+                      codes.append(s.upper())
+
+              return [c for c in codes if c]
 
           # --- schnelles Counting (Prefer: count=exact)
           def _count(url):
@@ -131,16 +150,18 @@ jobs:
                   "Range-Unit": "items",
                   "Range": "0-0"
               }
-              req = urllib.request.Request(url, headers=hdr)
-              with urllib.request.urlopen(req, timeout=20) as r:
-                  cr = r.headers.get("content-range", "*/0")
               try:
+                  _, headers = _req(url, hdr)
+                  cr = headers.get("content-range", "*/0")
                   return int(cr.split("/")[-1])
               except Exception:
                   return 0
 
           # Aktivität (letzte N Monate): Orders (mit MarketplaceId) oder Fees (mit Code)
           def has_activity(sb_url, tenant, code, months=12):
+              if months is None or months <= 0:
+                  return True
+              # Näherung über Jahresgrenze: n*30 Tage rückwärts → Jahr extrahieren
               y0 = (date.today().replace(day=1) - timedelta(days=months*30)).year
               mid = CODE2ID.get(code)
 
@@ -159,57 +180,115 @@ jobs:
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
           NA = {"US","CA","MX"}
           FE = {"JP","AU","SG"}
-          def mp_region(code):
+          def mp_region(code, fallback="eu"):
               if code in EU: return "eu"
               if code in NA: return "na"
               if code in FE: return "fe"
-              return "eu"
+              return fallback
 
           force = set([c.strip().upper() for c in (os.getenv("OVERRIDE_CODES") or "").split(",") if c.strip()]) or None
-          months = int(os.getenv("ACTIVITY_MONTHS") or 12)
+          months = os.getenv("ACTIVITY_MONTHS")
+          try:
+              months = int(months) if months is not None and months != "" else 12
+          except Exception:
+              months = 12
+
+          grace_days = os.getenv("NEW_CONN_GRACE_DAYS")
+          try:
+              grace_days = int(grace_days) if grace_days is not None and grace_days != "" else 45
+          except Exception:
+              grace_days = 45
 
           include = []
-          for row in rows:
+          skipped = []
+
+          for row in rows or []:
               tenant = (row.get("tenant_id") or "").strip()
               if not tenant:
+                  skipped.append({"tenant":"", "reason":"missing tenant_id"})
                   continue
               if filt_tenants != ["ALL"] and tenant not in filt_tenants:
+                  skipped.append({"tenant":tenant, "reason":"filtered by inputs.tenants"})
+                  continue
+
+              refresh_token = (row.get("refresh_token") or "").strip()
+              if not refresh_token:
+                  skipped.append({"tenant":tenant, "reason":"missing refresh_token"})
                   continue
 
               seller_id = (row.get("seller_id") or "").strip()
-              codes = extract_codes(row.get("marketplaces")) or ["DE"]
+              # Marketplaces extrahieren
+              codes = extract_codes(row.get("marketplaces"))
+              if not codes:
+                  codes = ["DE"]  # sinnvolle Voreinstellung
 
+              # optional hart begrenzen
               if force is not None:
                   codes = [c for c in codes if c in force]
+                  if not codes:
+                      skipped.append({"tenant":tenant, "reason":"no code after OVERRIDE_CODES"})
+                      continue
 
-              active = []
+              # Aktivität/Grace prüfen
+              from datetime import date as ddate
+              created_at = (row.get("created_at") or "")[:10]
+              is_in_grace = False
+              if created_at:
+                  try:
+                      cdate = ddate.fromisoformat(created_at)
+                      is_in_grace = (ddate.today() - cdate).days <= grace_days
+                  except Exception:
+                      is_in_grace = False
+
+              active_codes = []
               for c in sorted(set(codes)):
                   try:
-                      if has_activity(sb_url, tenant, c, months=months):
-                          active.append(c)
+                      if is_in_grace or has_activity(sb_url, tenant, c, months=months):
+                          active_codes.append(c)
                   except Exception:
-                      # im Zweifel nicht rausfiltern
-                      active.append(c)
+                      # Im Zweifel aufnehmen
+                      active_codes.append(c)
 
-              for code in active:
+              if not active_codes:
+                  skipped.append({"tenant":tenant, "reason":"no recent activity (and out of grace)"})
+                  continue
+
+              # Region
+              row_region = (row.get("region") or "").strip().lower()
+              for code in active_codes:
+                  region = row_region if row_region in {"eu","na","fe"} else mp_region(code)
                   include.append({
                       "tenant": tenant,
                       "marketplace": code,
-                      "region": mp_region(code),
+                      "region": region,
                       "seller_id": seller_id
                   })
 
-          if not include:
-              raise SystemExit("No matrix from amazon_connections (after activity filter)")
+          total = len(include)
+          if total == 0:
+              print("# No matrix entries assembled. Details:")
+              for s in skipped:
+                  print(f" - skip: {s}")
 
           out = {"include": include}
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix={json.dumps(out)}\n")
               f.write(f"year={yy}\n")
               f.write(f"month={mm}\n")
+              f.write(f"count={total}\n")
+
+          print("# === prep-matrix summary ===")
+          print("period:", yy, mm)
+          print("include:", total)
+          for it in include[:20]:
+              print(" -", it)
+          if total > 20:
+              print(f" (+{total-20} more…)")
+
           PY
 
   etl:
+    if: ${{ needs.prep-matrix.outputs.count != '0' }}
     name: ${{ matrix.tenant }} @ ${{ matrix.marketplace }} → ${{ needs.prep-matrix.outputs.year }}-${{ needs.prep-matrix.outputs.month }}
     needs: prep-matrix
     runs-on: ubuntu-latest
