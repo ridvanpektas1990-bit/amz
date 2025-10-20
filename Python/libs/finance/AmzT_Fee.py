@@ -408,7 +408,7 @@ def sum_item_shipping_components(item: dict) -> Tuple[Decimal, Decimal]:
             ship_tax_total += abs(amt)
     return ship_total, ship_tax_total
 
-# === Extractors ==============================================================#
+# === Extractors ==============================================================
 PROMO_DUP_SKIPPED = 0
 PROMO_SEEN: set = set()
 REFUND_SCAN_USED  = 0
@@ -821,7 +821,7 @@ def push_account_fees_detail(all_rows: List[List[Any]], *, marketplace_code: str
     upsert_rows(ACCOUNT_TABLE, payload, ACCOUNT_ON_CONFLICT, BATCH_SIZE)
     print(f"# Account-Fees gespeichert: {len(payload)} Zeilen → {ACCOUNT_TABLE}")
 
-# === Gruppierung / Aggregation ==============================================
+# === Gruppierung / Aggregation (derzeit nur für Helfer; Speicherung entfällt) ===
 CATEGORY_TO_GROUP = {
     "ShipmentItemFee": "ShipmentFees",
     "ShipmentItemAdjustmentFee": "ShipmentFees",
@@ -853,52 +853,6 @@ def detect_group_from_category(category: str) -> Optional[str]:
             return g
     return None
 
-def aggregate_groups_abs(abs_map: Dict[str, Decimal], *, by_cat_signed_map: Dict[str, Decimal]=None) -> Dict[str, float]:
-    totals: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    if by_cat_signed_map:
-        for catkey, s_val in by_cat_signed_map.items():
-            try:
-                category, _typ = catkey.split(":", 1)
-            except ValueError:
-                category = catkey
-            g = detect_group_from_category(category) or "Other"
-            totals[g] += abs(s_val)
-    else:
-        totals["All"] = sum(abs_map.values() or [Decimal("0")])
-    return {k: float(v) for k, v in totals.items() if v}
-
-def aggregate_groups_by_category(cat_map: Dict[str, Decimal]) -> Dict[str, float]:
-    out: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    for catkey, s in cat_map.items():
-        category = catkey.split(":", 1)[0]
-        out[category] += abs(s)
-    return {k: float(v) for k, v in out.items() if v}
-
-def aggregate_groups_by_group_type(cat_map: Dict[str, Decimal]) -> Dict[str, float]:
-    out: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    for catkey, s in cat_map.items():
-        if ":" in catkey:
-            category, typ = catkey.split(":", 1)
-        else:
-            category, typ = catkey, ""
-        grp = detect_group_from_category(category) or "Other"
-        out[f"{grp}:{typ}"] += abs(s)
-    return {k: float(v) for k, v in out.items() if v}
-
-DETAIL_KEYS_BASELINE = {
-    "Commission","VariableClosingFee","FixedClosingFee",
-    "FBAPerUnitFulfillmentFee","DigitalServicesFee","DigitalServicesFeeFBA",
-    "ShippingChargeback","GiftwrapChargeback","ShippingCharge","Shipping","ShippingTax","Tax","Principal",
-    "Promo_Item","ShipPromotion","Coupon","LightningDeal","DealOfTheDay","BestDeal",
-    "PrimeExclusiveDiscount","PriceDiscount","SubscribeAndSave","OutletDeal",
-    "CreditCardFinancing","SystemPromo","PlatformPromo","Promotion_Other",
-    "RefundCharge","RefundFee","RefundChargeAdjustment","RefundFeeAdjustment","RefundCommission",
-    "CompensatedClawback","WarehouseLost","WarehouseDamage",
-    "FBAInventoryPlacementServiceFee","LongTermStorageFee","ReversalReimbursement", "LightningDealFee", 
-    "BestDealFee", "DealOfTheDayFee",
-    "ShippingNet","ShippingNetPositiveOnly",
-}
-
 REFUND_PREFIXES = ("Refund", "GuaranteeClaim", "Chargeback")
 
 def is_refund_category(category: str) -> bool:
@@ -910,15 +864,6 @@ def split_cat_map(cat_map: Dict[str, Decimal]) -> tuple[Dict[str, Decimal], Dict
         category = catkey.split(":", 1)[0]
         (ref if is_refund_category(category) else pay)[catkey] = s
     return pay, ref
-
-def aggregate_details_from_cat(cat_map: Dict[str, Decimal]) -> tuple[Dict[str, Decimal], Dict[str, Decimal]]:
-    signed_by_type: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    abs_by_type: Dict[str, Decimal]    = defaultdict(lambda: Decimal("0"))
-    for catkey, s in cat_map.items():
-        typ = catkey.split(":", 1)[1] if ":" in catkey else catkey
-        signed_by_type[typ] += s
-        abs_by_type[typ]    += abs(s)
-    return signed_by_type, abs_by_type
 
 # === Fee-Lines (Audit) Upsert ===============================================
 def md5(s: str) -> str:
@@ -954,7 +899,7 @@ def push_fee_lines(all_rows: List[List[Any]], *, marketplace: str):
             order_id or "", sku or "", asin or "",
             gid or "", source or "",
             marketplace or "",
-            str(ordERS_YEAR) if False else str(ORDERS_YEAR),  # keep original
+            str(ORDERS_YEAR),
             str(ORDERS_MONTH),
             TENANT_ID,
         ])
@@ -995,19 +940,6 @@ def push_fee_lines(all_rows: List[List[Any]], *, marketplace: str):
 
     upsert_rows(FEE_LINES_TABLE, payload, FEE_LINES_ON_CONFLICT, BATCH_SIZE)
     print(f"# Fee-Lines gespeichert: {len(payload)} Zeilen → {FEE_LINES_TABLE} (skipped line_hash dupes: {LINEHASH_SKIPPED})")
-
-# === Sellerboard-Shipping Helper =============================================
-def compute_sellerboard_shipping_net(signed_by_type: Dict[str, Decimal]) -> Dict[str, Decimal]:
-    charge = (signed_by_type.get("ShippingCharge", Decimal("0"))
-              + signed_by_type.get("Shipping", Decimal("0"))
-              + signed_by_type.get("ShippingTax", Decimal("0")))
-    promo  = (signed_by_type.get("ShipPromotion", Decimal("0"))
-              + signed_by_type.get("ShippingPromotion", Decimal("0"))
-              + signed_by_type.get("ShippingDiscount", Decimal("0"))
-              + signed_by_type.get("ShippingTaxDiscount", Decimal("0")))
-    net = charge + promo
-    net_pos = net if net > 0 else Decimal("0")
-    return {"charge": charge, "promo": promo, "net": net, "net_pos": net_pos}
 
 # === Main ====================================================================
 def run():
@@ -1087,7 +1019,7 @@ def run():
 
             new_events = resp.payload.get("FinancialEvents", {}) or {}
             for k, v in new_events.items():
-                if not v: 
+                if not v:
                     continue
                 if isinstance(v, list):
                     events.setdefault(k, []); events[k].extend(v)
@@ -1258,7 +1190,7 @@ def run():
     if not SKIP_FEE_LINES:
         push_fee_lines(all_rows, marketplace=MP_CODE)
 
-    # --- Upsert Aggregat (Payment/Refund) ------------------------------------
+    # --- Upsert Aggregat (Payment/Refund)  — NUR DByCS speichern --------------
     rows_by_sku = []
     skipped_account_level = 0
 
@@ -1267,33 +1199,16 @@ def run():
             skipped_account_level += 1
             continue
 
-        # Payment vs Refund mit globalem Helper splitten
+        # Payment vs Refund splitten
         pay_cat, ref_cat = split_cat_map(cat_map_all)
 
         for phase, cat_map in (("Payment", pay_cat), ("Refund", ref_cat)):
             if not cat_map:
                 continue
 
-            # Details aggregieren (globale Helper nutzen)
-            signed_by_type, abs_by_type = aggregate_details_from_cat(cat_map)
-
-            ship_parts = compute_sellerboard_shipping_net(signed_by_type)
-            signed_by_type["ShippingNet"] = ship_parts["net"]
-            signed_by_type["ShippingNetPositiveOnly"] = ship_parts["net_pos"]
-
-            details = {k: float(v) for k, v in abs_by_type.items() if v}
-            details_signed = {
-                k: float(signed_by_type.get(k, Decimal("0")))
-                for k in sorted(DETAIL_KEYS_BASELINE | set(signed_by_type.keys()))
-            }
+            # Nur diese zwei Werte aufbauen:
             details_by_category_signed = {k: float(v) for k, v in cat_map.items()}
-
-            # Gruppen-Aggregate
-            groups = aggregate_groups_abs(abs_by_type, by_cat_signed_map=cat_map)
-            groups_by_category = aggregate_groups_by_category(cat_map)
-            groups_by_group_type = aggregate_groups_by_group_type(cat_map)
-
-            fee_total_abs = float(sum(abs_by_type.values()))
+            fee_total_abs = float(sum(abs(v) for v in cat_map.values()))
 
             # letzte Posted-Zeit für diese SKU/Phase (Fallback = Monatsanfang)
             keyp = (oid, seller_sku or "_ORDER_LEVEL_", asin_val or "", cur or "", phase)
@@ -1314,12 +1229,7 @@ def run():
                 "currency": cur or "EUR",
                 "fee_total": fee_total_abs,
                 "fee_breakdown": {
-                    "groups": groups,
-                    "groups_by_category": groups_by_category,
-                    "groups_by_group_type": groups_by_group_type,
-                    "details": details,
-                    "details_signed": details_signed,
-                    "details_by_category_signed": details_by_category_signed,
+                    "details_by_category_signed": details_by_category_signed
                 },
                 "transaction_phase": phase,
                 "last_posted_at": iso_z(last_dt),
