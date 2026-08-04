@@ -1,6 +1,7 @@
 // C:\Users\ridva\OneDrive\Desktop\Privat\Projekte\amz-connect\src\app\api\amazon\callback\route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { createTenantCookie } from "@/lib/amazon-tenant-cookie";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -133,6 +134,17 @@ export async function GET(req: NextRequest) {
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
     });
+    res.cookies.set(
+      "amz_tenant",
+      createTenantCookie(sellerId, must("LWA_CLIENT_SECRET")),
+      {
+      path: "/",
+      maxAge: 60 * 60 * 24 * 365,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      },
+    );
     return res;
 
   } catch (e: unknown) {
