@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { NextRequest } from "next/server";
 
 function signatureFor(tenantId: string, secret: string) {
   return crypto.createHmac("sha256", secret).update(tenantId).digest("base64url");
@@ -22,4 +23,10 @@ export function readTenantCookie(value: string | undefined, secret: string) {
 
   if (supplied.length !== expected.length) return null;
   return crypto.timingSafeEqual(supplied, expected) ? tenantId : null;
+}
+
+export function tenantIdFromRequest(req: NextRequest) {
+  const secret = process.env.LWA_CLIENT_SECRET;
+  if (!secret) return null;
+  return readTenantCookie(req.cookies.get("amz_tenant")?.value, secret);
 }

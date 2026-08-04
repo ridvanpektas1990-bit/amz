@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -63,10 +64,14 @@ function isoWeekStartEndUTC(year: number, week: number): { start: Date; end: Dat
 }
 
 /* === Route === */
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
+    const tenantId = tenantIdFromRequest(req);
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "not_connected" }, { status: 401 });
+    }
     const url = new URL(req.url);
-    const year = Number(url.searchParams.get("year") ?? "2025");
+    const year = Number(url.searchParams.get("year") ?? new Date().getUTCFullYear());
     const fixed = url.searchParams.get("fixed") === "1";
     const debug = url.searchParams.get("debug") === "1";
     const sku = (url.searchParams.get("sku") || "").trim();
@@ -87,6 +92,7 @@ export async function GET(req: Request) {
       let q = sb
         .from("vw_amazon_fees_orders")
         .select("purchase_date_berlin, quantity, seller_sku")
+        .eq("tenant_id", tenantId)
         .gte("purchase_date_berlin", startStr)
         .lte("purchase_date_berlin", endStr);
 

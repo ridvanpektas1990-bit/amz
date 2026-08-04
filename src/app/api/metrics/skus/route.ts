@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,15 +18,12 @@ function supa() {
   );
 }
 
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-
-    const table   = (url.searchParams.get("table")    ?? "vw_amazon_fees_orders").toLowerCase();
-    const skuCol  = (url.searchParams.get("sku_col")  ?? "seller_sku").toLowerCase();
-    const dateCol = (url.searchParams.get("date_col") ?? "").toLowerCase();
-    const startIso = url.searchParams.get("start") ?? null;
-    const endIso   = url.searchParams.get("end")   ?? null;
+    const tenantId = tenantIdFromRequest(req);
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "not_connected" }, { status: 401 });
+    }
 
     const sb = supa();
 
@@ -37,18 +35,16 @@ export async function GET(req: Request) {
     const map = new Map<string, string>();
 
     for (;;) {
-      let sel = skuCol;
-      if (dateCol && startIso && endIso) sel = `${skuCol}, ${dateCol}`;
-
-      let q = sb.from(table).select(sel);
-      if (dateCol && startIso && endIso) q = q.gte(dateCol, startIso).lte(dateCol, endIso);
-
-      const { data, error } = await q.range(from, to);
+      const { data, error } = await sb
+        .from("vw_amazon_fees_orders")
+        .select("seller_sku")
+        .eq("tenant_id", tenantId)
+        .range(from, to);
       if (error) throw new Error(`SKU page ${from}-${to}: ${error.message}`);
       if (!data || data.length === 0) break;
 
       for (const row of data as any[]) {
-        const raw: string = String(row[skuCol] ?? "");
+        const raw: string = String(row.seller_sku ?? "");
         if (!raw) continue;
         const norm = raw.trim().toUpperCase();
         if (!map.has(norm)) map.set(norm, raw); // rohen Wert behalten!

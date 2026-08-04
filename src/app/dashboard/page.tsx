@@ -217,8 +217,8 @@ function YearChart({
   const nf = useMemo(() => new Intl.NumberFormat("de-DE"), []);
 
   // Cutoff-Woche für YTD
-  const cutoffWeek2025 = useMemo(() => {
-    if (year !== 2025) return null;
+  const cutoffWeekCurrent = useMemo(() => {
+    if (year !== currentIso?.year) return null;
     const wkNow = currentIso?.week ?? 53;
     const maxWithData = data.reduce((m, p) => (p.total > 0 ? Math.max(m, p.isoWeek) : m), 0);
     const cutoff = Math.min(wkNow, Math.max(maxWithData, 0));
@@ -227,28 +227,30 @@ function YearChart({
 
   // YTD 2025 vs 2024
   const ytd = useMemo(() => {
-    if (year !== 2025) return null;
-    if (!cutoffWeek2025) return null;
+    if (year !== currentIso?.year) return null;
+    if (!cutoffWeekCurrent) return null;
 
-    const sum2025 = data
-      .filter((p) => p.isoWeek <= cutoffWeek2025)
+    const currentTotal = data
+      .filter((p) => p.isoWeek <= cutoffWeekCurrent)
       .reduce((acc, p) => acc + (p.total || 0), 0);
 
-    let sum2024: number | null = null;
+    let previousTotal: number | null = null;
     if (prevYearWeekTotals) {
       let s = 0;
-      for (let w = 1; w <= cutoffWeek2025; w++) {
+      for (let w = 1; w <= cutoffWeekCurrent; w++) {
         s += Math.max(0, prevYearWeekTotals.get?.(w) ?? 0);
       }
-      sum2024 = s;
+      previousTotal = s;
     }
 
     let pct: number | null = null;
-    if (sum2024 !== null) {
-      pct = sum2024 === 0 ? (sum2025 === 0 ? 0 : 100) : ((sum2025 - sum2024) / sum2024) * 100;
+    if (previousTotal !== null) {
+      pct = previousTotal === 0
+        ? (currentTotal === 0 ? 0 : 100)
+        : ((currentTotal - previousTotal) / previousTotal) * 100;
     }
-    return { cutoff: cutoffWeek2025, sum2025, sum2024, pct };
-  }, [year, cutoffWeek2025, data, prevYearWeekTotals]);
+    return { cutoff: cutoffWeekCurrent, currentTotal, previousTotal, pct };
+  }, [year, currentIso, cutoffWeekCurrent, data, prevYearWeekTotals]);
 
   const ytdColorClass = useMemo(() => {
     if (!ytd || ytd.pct === null) return "text-gray-600";
@@ -257,7 +259,7 @@ function YearChart({
 
   // Farb-Logik für Bars:
   const colorForBar = (p: Point): string => {
-    if (year === 2025 && prevYearWeekTotals) {
+    if (year === currentIso?.year && prevYearWeekTotals) {
       const prev = prevYearWeekTotals.get?.(p.isoWeek);
       const curr = p.total || 0;
       if (prev === undefined) return "#8884d8";
@@ -273,17 +275,17 @@ function YearChart({
   };
 
   // 2025 Wochen (für OOS)
-  const weekTotals2025 = useMemo(() => {
+  const currentYearWeekTotals = useMemo(() => {
     const m = new Map<number, number>();
-    if (year === 2025) {
+    if (year === currentIso?.year) {
       data.forEach((p) => m.set(p.isoWeek, p.total || 0));
     }
     return m;
-  }, [data, year]);
+  }, [data, year, currentIso]);
 
   // --- OOS-Schätzung ---
   const oosForecast = useMemo(() => {
-    if (year !== 2025) return null;
+    if (year !== currentIso?.year) return null;
     if (!currentIso) return null;
     if (inventoryLeft == null) return null;
 
@@ -307,7 +309,7 @@ function YearChart({
 
     if (remaining > 0) {
       for (let w = 1; w <= 53; w++) {
-        const s = Math.max(0, weekTotals2025.get(w) ?? 0);
+        const s = Math.max(0, currentYearWeekTotals.get(w) ?? 0);
         remaining -= s;
         weeks += 1;
         if (remaining <= 0) {
@@ -319,10 +321,10 @@ function YearChart({
 
     if (remaining > 0) return { weeks: -1, weekKw: null };
     return { weeks, weekKw: hitWeekKw };
-  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, weekTotals2025]);
+  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, currentYearWeekTotals]);
 
   const oosTextAndColor = useMemo(() => {
-    if (year !== 2025 || !sku || inventoryLeft == null) return null;
+    if (year !== currentIso?.year || !sku || inventoryLeft == null) return null;
     if (!oosForecast) return null;
     const { weeks, weekKw } = oosForecast;
     if (weeks === 0) return { text: "OOS: jetzt", cls: "text-red-600" };
@@ -330,7 +332,7 @@ function YearChart({
     const cls = weeks <= 4 ? "text-red-600" : weeks <= 8 ? "text-yellow-600" : "text-green-600";
     const kwPart = weekKw ? ` (KW ${weekKw})` : "";
     return { text: `OOS in ${weeks} ${weeks === 1 ? "Woche" : "Wochen"}${kwPart}`, cls };
-  }, [oosForecast, year, sku, inventoryLeft]);
+  }, [oosForecast, year, currentIso, sku, inventoryLeft]);
 
   /* === Hover-Hotspot + SVG-Tooltip für OOS === */
   const [oosTipVisible, setOosTipVisible] = useState(false);
@@ -355,20 +357,20 @@ function YearChart({
       <div className="grid grid-cols-3 items-start mb-2">
         {/* LINKS: YTD */}
         <div className="flex flex-col">
-          {year === 2025 && ytd && (
+          {year === currentIso?.year && ytd && (
             <div className="mt-1 text-sm">
               <div className="text-[11px] uppercase tracking-wide text-gray-500">
                 YTD Jahresvergleich bis KW {ytd.cutoff}
               </div>
               <div className="leading-tight">
-                <span className="text-base font-semibold">{nf.format(ytd.sum2025)} Stk</span>
+                <span className="text-base font-semibold">{nf.format(ytd.currentTotal)} Stk</span>
                 {ytd.pct !== null && (
                   <span className="ml-2 text-sm">
                     <span className={ytdColorClass}>
                       {ytd.pct > 0 ? "▲ +" : ytd.pct < 0 ? "▼ " : "±"}
                       {Math.abs(ytd.pct).toFixed(1).replace(".", ",")}% 
                     </span>{" "}
-                    vs. 2024 {ytd.sum2024 !== null ? `(${nf.format(ytd.sum2024)} Stk)` : ""}
+                    vs. {year - 1} {ytd.previousTotal !== null ? `(${nf.format(ytd.previousTotal)} Stk)` : ""}
                   </span>
                 )}
               </div>
@@ -382,7 +384,7 @@ function YearChart({
         </h2>
 
         {/* RECHTS: Lager/OOS */}
-        {year === 2025 && sku && typeof inventoryLeft === "number" && (
+        {year === currentIso?.year && sku && typeof inventoryLeft === "number" && (
           <div className="justify-self-end text-right">
             <div className="text-[11px] uppercase tracking-wide text-gray-500">Auf Lager</div>
             <div className="leading-none">
@@ -471,8 +473,8 @@ function YearChart({
                 })()
               : null}
 
-            {/* OOS-Linie (2025) + Hover-Hotspot & SVG-Tooltip */}
-            {year === 2025 && oosForecast?.weekKw
+            {/* OOS-Linie des aktuellen Jahres + Hover-Hotspot & SVG-Tooltip */}
+            {year === currentIso?.year && oosForecast?.weekKw
               ? (() => {
                   const oosKW = oosForecast.weekKw!;
                   const xLabel = labelByWeek.get(oosKW);
@@ -593,8 +595,10 @@ function YearChart({
 
 /* ===== Page ===== */
 export default function DashboardPage() {
-  const [y2025, setY2025] = useState<Point[] | null>(null);
-  const [y2024, setY2024] = useState<Point[] | null>(null);
+  const currentYear = new Date().getUTCFullYear();
+  const previousYear = currentYear - 1;
+  const [currentYearData, setCurrentYearData] = useState<Point[] | null>(null);
+  const [previousYearData, setPreviousYearData] = useState<Point[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -603,8 +607,8 @@ export default function DashboardPage() {
   const [skuLoadErr, setSkuLoadErr] = useState<string | null>(null);
   const [skuLoading, setSkuLoading] = useState<boolean>(true);
 
-  const [ev2025, setEv2025] = useState<RawEvent[] | null>(null);
-  const [ev2024, setEv2024] = useState<RawEvent[] | null>(null);
+  const [currentYearEvents, setCurrentYearEvents] = useState<RawEvent[] | null>(null);
+  const [previousYearEvents, setPreviousYearEvents] = useState<RawEvent[] | null>(null);
 
   // Inventory
   const [inventoryLeft, setInventoryLeft] = useState<number | null>(null);
@@ -625,7 +629,7 @@ export default function DashboardPage() {
       setSkuLoading(true);
       setSkuLoadErr(null);
       try {
-        const r = await fetch(`/api/metrics/skus?table=vw_amazon_fees_orders&sku_col=seller_sku`, { cache: "no-store" });
+        const r = await fetch("/api/metrics/skus", { cache: "no-store" });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(j?.error || "SKU-Fehler");
         const list: SkuOption[] = (j.skus as any[]).map((v) =>
@@ -649,45 +653,45 @@ export default function DashboardPage() {
       setErr(null);
       try {
         const qs = sku ? `&sku=${encodeURIComponent(sku)}` : "";
-        const [r25, r24] = await Promise.all([
-          fetch(`/api/metrics/orders-per-week?year=2025&fixed=1${qs}`, { cache: "no-store" }),
-          fetch(`/api/metrics/orders-per-week?year=2024&fixed=1${qs}`, { cache: "no-store" }),
+        const [currentResponse, previousResponse] = await Promise.all([
+          fetch(`/api/metrics/orders-per-week?year=${currentYear}&fixed=1${qs}`, { cache: "no-store" }),
+          fetch(`/api/metrics/orders-per-week?year=${previousYear}&fixed=1${qs}`, { cache: "no-store" }),
         ]);
-        const j25 = await r25.json();
-        const j24 = await r24.json();
-        if (!r25.ok || !j25.ok) throw new Error(j25?.error || "Fehler 2025");
-        if (!r24.ok || !j24.ok) throw new Error(j24?.error || "Fehler 2024");
-        setY2025(j25.points as Point[]);
-        setY2024(j24.points as Point[]);
+        const currentJson = await currentResponse.json();
+        const previousJson = await previousResponse.json();
+        if (!currentResponse.ok || !currentJson.ok) throw new Error(currentJson?.error || `Fehler ${currentYear}`);
+        if (!previousResponse.ok || !previousJson.ok) throw new Error(previousJson?.error || `Fehler ${previousYear}`);
+        setCurrentYearData(currentJson.points as Point[]);
+        setPreviousYearData(previousJson.points as Point[]);
       } catch (e: any) {
         setErr(e.message);
       } finally {
         setLoading(false);
       }
     })();
-  }, [sku]);
+  }, [sku, currentYear, previousYear]);
 
   // Events je Jahr laden
   useEffect(() => {
     (async () => {
       try {
-        const [e25, e24] = await Promise.all([
-          fetch(`/api/events?year=2025`, { cache: "no-store" }),
-          fetch(`/api/events?year=2024`, { cache: "no-store" }),
+        const [currentResponse, previousResponse] = await Promise.all([
+          fetch(`/api/events?year=${currentYear}`, { cache: "no-store" }),
+          fetch(`/api/events?year=${previousYear}`, { cache: "no-store" }),
         ]);
-        const j25 = await e25.json();
-        const j24 = await e24.json();
-        if (!e25.ok || j25.error) throw new Error(j25?.error || "Events 2025 Fehler");
-        if (!e24.ok || j24.error) throw new Error(j24?.error || "Events 2024 Fehler");
-        setEv2025(j25.events as RawEvent[]);
-        setEv2024(j24.events as RawEvent[]);
+        const currentJson = await currentResponse.json();
+        const previousJson = await previousResponse.json();
+        if (!currentResponse.ok || currentJson.error) throw new Error(currentJson?.error || `Events ${currentYear} Fehler`);
+        if (!previousResponse.ok || previousJson.error) throw new Error(previousJson?.error || `Events ${previousYear} Fehler`);
+        setCurrentYearEvents(currentJson.events as RawEvent[]);
+        setPreviousYearEvents(previousJson.events as RawEvent[]);
       } catch (e) {
         console.warn("Events laden:", e);
-        setEv2025([]);
-        setEv2024([]);
+        setCurrentYearEvents([]);
+        setPreviousYearEvents([]);
       }
     })();
-  }, []);
+  }, [currentYear, previousYear]);
 
   // Inventory laden wenn SKU gesetzt
   useEffect(() => {
@@ -713,19 +717,19 @@ export default function DashboardPage() {
   }, [sku]);
 
   const yMax = useMemo(() => {
-    const m25 = y2025 ? Math.max(0, ...y2025.map((p) => p.total)) : 0;
-    const m24 = y2024 ? Math.max(0, ...y2024.map((p) => p.total)) : 0;
-    return Math.max(m25, m24);
-  }, [y2025, y2024]);
+    const currentMax = currentYearData ? Math.max(0, ...currentYearData.map((p) => p.total)) : 0;
+    const previousMax = previousYearData ? Math.max(0, ...previousYearData.map((p) => p.total)) : 0;
+    return Math.max(currentMax, previousMax);
+  }, [currentYearData, previousYearData]);
 
-  const evMap2025 = useMemo<EventsForYear | null>(
-    () => (y2025 && ev2025 ? buildEventMappings(y2025, ev2025, todayISO) : null),
-    [y2025, ev2025, todayISO]
+  const currentEventMap = useMemo<EventsForYear | null>(
+    () => (currentYearData && currentYearEvents ? buildEventMappings(currentYearData, currentYearEvents, todayISO) : null),
+    [currentYearData, currentYearEvents, todayISO]
   );
 
-  const evMap2024 = useMemo<EventsForYear | null>(
-    () => (y2024 && ev2024 ? buildEventMappings(y2024, ev2024, todayISO) : null),
-    [y2024, ev2024, todayISO]
+  const previousEventMap = useMemo<EventsForYear | null>(
+    () => (previousYearData && previousYearEvents ? buildEventMappings(previousYearData, previousYearEvents, todayISO) : null),
+    [previousYearData, previousYearEvents, todayISO]
   );
 
   // Aktuelle ISO-Woche/Jahr
@@ -736,35 +740,35 @@ export default function DashboardPage() {
   }, [todayISO]);
 
   // Vorjahres-Map
-  const prev2024Map = useMemo(() => {
-    return y2024 ? new Map<number, number>(y2024.map((p) => [p.isoWeek, p.total])) : null;
-  }, [y2024]);
+  const previousYearMap = useMemo(() => {
+    return previousYearData ? new Map<number, number>(previousYearData.map((p) => [p.isoWeek, p.total])) : null;
+  }, [previousYearData]);
 
   // Header-Zahlenformat
   const nfTop = useMemo(() => new Intl.NumberFormat("de-DE"), []);
 
   // 2025 Wochen-Map
-  const weekTotals2025Map = useMemo(() => {
-    return y2025 ? new Map<number, number>(y2025.map((p) => [p.isoWeek, p.total || 0])) : null;
-  }, [y2025]);
+  const currentYearMap = useMemo(() => {
+    return currentYearData ? new Map<number, number>(currentYearData.map((p) => [p.isoWeek, p.total || 0])) : null;
+  }, [currentYearData]);
 
   // Reorder-Plan (6 Monate) – korrekt mit Jahreswechseln
   const reorderPlanTop = useMemo(() => {
     if (!sku || inventoryLeft == null) return null;
-    if (!currentIso || !prev2024Map || !weekTotals2025Map) return null;
+    if (!currentIso || !previousYearMap || !currentYearMap) return null;
 
-    type YearTag = 2024 | 2025;
+    type YearTag = "previous" | "current";
     const demandOf = (tag: YearTag, w: number) =>
-      Math.max(0, (tag === 2024 ? prev2024Map.get(w) : weekTotals2025Map.get(w)) ?? 0);
+      Math.max(0, (tag === "previous" ? previousYearMap.get(w) : currentYearMap.get(w)) ?? 0);
 
     let remaining = inventoryLeft;
     let w = currentIso.week;
-    let tag: YearTag = 2024;
+    let tag: YearTag = "previous";
     let elapsed = 0;
 
     for (let guard = 0; guard < 500 && remaining > 0; guard++) {
       w += 1;
-      if (w > 53) { w = 1; tag = tag === 2024 ? 2025 : 2024; }
+      if (w > 53) { w = 1; tag = tag === "previous" ? "current" : "previous"; }
       remaining -= demandOf(tag, w);
       elapsed += 1;
     }
@@ -778,7 +782,7 @@ export default function DashboardPage() {
     let ttag: YearTag = tag;
     for (let i = 0; i < 26; i++) {
       tw += 1;
-      if (tw > 53) { tw = 1; ttag = ttag === 2024 ? 2025 : 2024; }
+      if (tw > 53) { tw = 1; ttag = ttag === "previous" ? "current" : "previous"; }
       need += demandOf(ttag, tw);
     }
 
@@ -791,19 +795,19 @@ export default function DashboardPage() {
       newOOSWeek: newOOS.week,
       newOOSYear: newOOS.year,
     };
-  }, [sku, inventoryLeft, currentIso, prev2024Map, weekTotals2025Map]);
+  }, [sku, inventoryLeft, currentIso, previousYearMap, currentYearMap]);
 
   // Countdown (optional)
   type UpcomingEvent = RawEvent & { days: number };
   const futureEvents = useMemo<UpcomingEvent[]>(() => {
-    const all: RawEvent[] = [...(ev2024 || []), ...(ev2025 || [])];
+    const all: RawEvent[] = [...(previousYearEvents || []), ...(currentYearEvents || [])];
     const t = new Date(todayISO + "T00:00:00Z").getTime();
     return all
       .map((e) => ({ ...e, days: Math.ceil((new Date(e.event_date + "T00:00:00Z").getTime() - t) / 86400000) }))
       .filter((e) => e.days > 0)
       .sort((a, b) => a.days - b.days)
       .slice(0, 2);
-  }, [ev2024, ev2025, todayISO]);
+  }, [previousYearEvents, currentYearEvents, todayISO]);
 
   const emojiFor = (name: string) => {
     const n = name.toLowerCase();
@@ -895,39 +899,25 @@ export default function DashboardPage() {
       {loading && <div>lädt…</div>}
       {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
 
-      {y2025 && y2024 && (
+      {currentYearData && previousYearData && (
         <>
           <YearChart
-            data={y2025}
-            year={2025}
-            yMax={Math.max(
-              y2025 ? Math.max(0, ...y2025.map((p) => p.total)) : 0,
-              y2024 ? Math.max(0, ...y2024.map((p) => p.total)) : 0
-            )}
+            data={currentYearData}
+            year={currentYear}
+            yMax={yMax}
             sku={sku}
-            events={evMap2025}
-            prevYearWeekTotals={new Map(y2024.map((p) => [p.isoWeek, p.total]))}
-            currentIso={(() => {
-              const { isoWeek } = isoWeekFromDateISO(todayISO);
-              const y = new Date(todayISO + "T00:00:00Z").getUTCFullYear();
-              return { year: y, week: isoWeek };
-            })()}
+            events={currentEventMap}
+            prevYearWeekTotals={previousYearMap}
+            currentIso={currentIso}
             inventoryLeft={inventoryLeft}
           />
           <YearChart
-            data={y2024}
-            year={2024}
-            yMax={Math.max(
-              y2025 ? Math.max(0, ...y2025.map((p) => p.total)) : 0,
-              y2024 ? Math.max(0, ...y2024.map((p) => p.total)) : 0
-            )}
+            data={previousYearData}
+            year={previousYear}
+            yMax={yMax}
             sku={sku}
-            events={evMap2024}
-            currentIso={(() => {
-              const { isoWeek } = isoWeekFromDateISO(todayISO);
-              const y = new Date(todayISO + "T00:00:00Z").getUTCFullYear();
-              return { year: y, week: isoWeek };
-            })()}
+            events={previousEventMap}
+            currentIso={currentIso}
           />
         </>
       )}

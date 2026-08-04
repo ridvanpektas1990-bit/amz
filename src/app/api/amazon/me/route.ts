@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import aws4 from "aws4";
+import { loadAmazonConnection } from "@/lib/amazon-connection";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,17 +29,12 @@ export async function GET(req: NextRequest) {
     const region = (url.searchParams.get("region") ?? process.env.NEXT_PUBLIC_DEFAULT_REGION ?? "eu").toLowerCase();
 
     // 1) Refresh-Token aus Supabase holen (jüngster Datensatz für die Region)
-    const sb = createClient(must("SUPABASE_URL"), must("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false } });
-    const { data, error } = await sb
-      .from("amazon_connections")
-      .select("seller_id, refresh_token")
-      .eq("region", region)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (error) return NextResponse.json({ ok:false, error: error.message }, { status: 500 });
-    if (!data?.refresh_token) return NextResponse.json({ ok:false, error:"no_refresh_token" }, { status: 400 });
+    const connectionResult = await loadAmazonConnection(req, region);
+    if (!connectionResult.connection) {
+      const status = connectionResult.error === "not_connected" ? 401 : 400;
+      return NextResponse.json({ ok:false, error:connectionResult.error }, { status });
+    }
+    const data = connectionResult.connection;
 
     // 2) Access-Token holen
     const { access_token } = await refreshAccessToken(data.refresh_token);

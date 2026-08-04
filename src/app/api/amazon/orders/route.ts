@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import aws4 from "aws4";
+import { loadAmazonConnection } from "@/lib/amazon-connection";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,16 +53,12 @@ export async function GET(req: NextRequest) {
     const createdAfterIso = toIsoZ(createdAfter);
 
     // ---- Refresh-Token laden ----
-    const sb = createClient(must("SUPABASE_URL"), must("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false } });
-    const { data: conn, error: dbErr } = await sb
-      .from("amazon_connections")
-      .select("seller_id, refresh_token")
-      .eq("region", region)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (dbErr) return NextResponse.json({ ok:false, error: dbErr.message }, { status: 500 });
-    if (!conn?.refresh_token) return NextResponse.json({ ok:false, error:"no_refresh_token" }, { status: 400 });
+    const connectionResult = await loadAmazonConnection(req, region);
+    if (!connectionResult.connection) {
+      const status = connectionResult.error === "not_connected" ? 401 : 400;
+      return NextResponse.json({ ok:false, error:connectionResult.error }, { status });
+    }
+    const conn = connectionResult.connection;
 
     // ---- LWA Access-Token ----
     const { access_token } = await refreshAccessToken(conn.refresh_token);

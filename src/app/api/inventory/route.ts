@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -11,8 +12,12 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // GET /api/inventory?sku=ABC123
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
+    const tenantId = tenantIdFromRequest(req);
+    if (!tenantId) {
+      return NextResponse.json({ ok: false, error: "not_connected" }, { status: 401 });
+    }
     const { searchParams } = new URL(req.url);
     const sku = (searchParams.get("sku") || "").trim();
     if (!sku) {
@@ -22,6 +27,7 @@ export async function GET(req: Request) {
     const { data, error } = await supabase
       .from("vw_inventory_latest_per_asin_max")
       .select("inventory_left")
+      .eq("tenant_id", tenantId)
       .eq("seller_sku", sku)
       .maybeSingle();
 
