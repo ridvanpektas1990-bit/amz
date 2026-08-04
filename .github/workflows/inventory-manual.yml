@@ -1,0 +1,42 @@
+name: Inventory snapshot (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant:
+        description: "tenant_id; leer = ACTIVE_TENANTS"
+        required: false
+        default: ""
+      marketplace:
+        description: "Marketplace-Code"
+        required: true
+        default: "DE"
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -U python-amazon-sp-api supabase python-dotenv tzdata
+
+      - name: Fetch and store current inventory
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          TENANT_ID: ${{ inputs.tenant || vars.ACTIVE_TENANTS }}
+          MARKETPLACE: ${{ inputs.marketplace }}
+          LOCAL_TZ: ${{ vars.LOCAL_TZ || 'Europe/Berlin' }}
+          SUPABASE_BATCH_SIZE: ${{ vars.SUPABASE_BATCH_SIZE || '300' }}
+        run: python Python/libs/inventory/AmzT_Inventory.py
