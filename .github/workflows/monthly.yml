@@ -7,7 +7,7 @@ on:
     inputs:
       period_year:  { type: string, required: false, description: "YYYY" }
       period_month: { type: string, required: false, description: "M oder MM" }
-      tenants:      { type: string, required: false, description: "CSV oder ALL", default: "ALL" }
+      tenants:      { type: string, required: false, description: "CSV oder ALL; leer = ACTIVE_TENANTS" }
       which:        { type: choice,  required: false, default: beides, options: [beides, fees, orders] }
       
 permissions:
@@ -20,7 +20,7 @@ jobs:
     with:
       period_year:  ${{ inputs.period_year }}
       period_month: ${{ inputs.period_month }}
-      tenants:      ${{ inputs.tenants || 'ALL' }}
+      tenants:      ${{ inputs.tenants || vars.ACTIVE_TENANTS || 'ALL' }}
       which:        ${{ inputs.which || 'beides' }}
-      max_parallel: 8
+      max_parallel: 1
     secrets: inherit
