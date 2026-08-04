@@ -7,7 +7,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -145,7 +145,7 @@ def build_rows(
 ) -> list[dict[str, Any]]:
     now = datetime.now(LOCAL_TZ)
     snapshot_date = now.date().isoformat()
-    captured_at = now.isoformat()
+    captured_at = datetime.now(timezone.utc).isoformat()
 
     aliases = {
         "tenant": first_present(columns, "tenant_id", "tenant"),
@@ -153,7 +153,7 @@ def build_rows(
         "marketplace": first_present(columns, "marketplace", "marketplace_code"),
         "marketplace_id": first_present(columns, "marketplace_id"),
         "date": first_present(columns, "snapshot_date", "inventory_date", "report_date", "date", "day"),
-        "captured": first_present(columns, "captured_at", "snapshot_at", "updated_at"),
+        "captured": first_present(columns, "fetched_at_utc", "captured_at", "snapshot_at", "updated_at"),
         "sku": first_present(columns, "seller_sku", "sku"),
         "asin": first_present(columns, "asin"),
         "fnsku": first_present(columns, "fn_sku", "fnsku"),
@@ -164,8 +164,10 @@ def build_rows(
         "inbound_shipped": first_present(columns, "inbound_shipped_quantity"),
         "inbound_receiving": first_present(columns, "inbound_receiving_quantity"),
         "reserved": first_present(columns, "reserved_quantity", "total_reserved_quantity"),
+        "pending_customer": first_present(columns, "pending_customer_order_quantity"),
         "unfulfillable": first_present(columns, "unfulfillable_quantity", "total_unfulfillable_quantity"),
         "researching": first_present(columns, "researching_quantity", "total_researching_quantity"),
+        "details": first_present(columns, "details"),
     }
     if not aliases["sku"] or not aliases["available"]:
         raise SystemExit(
@@ -196,8 +198,10 @@ def build_rows(
             "inbound_shipped": details.get("inboundShippedQuantity", 0),
             "inbound_receiving": details.get("inboundReceivingQuantity", 0),
             "reserved": reserved.get("totalReservedQuantity", 0),
+            "pending_customer": reserved.get("pendingCustomerOrderQuantity", 0),
             "unfulfillable": unfulfillable.get("totalUnfulfillableQuantity", 0),
             "researching": researching.get("totalResearchingQuantity", 0),
+            "details": item,
         }
         row = {column: values[key] for key, column in aliases.items() if column and values[key] is not None}
         rows.append(row)
