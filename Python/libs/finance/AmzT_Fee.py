@@ -75,7 +75,10 @@ WORKERS         = int(os.getenv("SPAPI_WORKERS", "1"))  # 1 = sequentiell
 
 # Optional: CSV-Audits
 SKIP_AUDIT_CSV = os.getenv("SKIP_AUDIT_CSV", "1") == "1"
-SKIP_FEE_LINES = os.getenv("SKIP_FEE_LINES", "0") == "1"
+# Detailed fee lines are only an optional audit trail. The application reads the
+# aggregated amazon_fees data, so avoid duplicating every financial event by
+# default. Set SKIP_FEE_LINES=0 explicitly when a temporary audit is required.
+SKIP_FEE_LINES = os.getenv("SKIP_FEE_LINES", "1") == "1"
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "output"
