@@ -597,8 +597,10 @@ function YearChart({
 export default function DashboardPage() {
   const currentYear = new Date().getUTCFullYear();
   const previousYear = currentYear - 1;
+  const olderYear = currentYear - 2;
   const [currentYearData, setCurrentYearData] = useState<Point[] | null>(null);
   const [previousYearData, setPreviousYearData] = useState<Point[] | null>(null);
+  const [olderYearData, setOlderYearData] = useState<Point[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -609,6 +611,7 @@ export default function DashboardPage() {
 
   const [currentYearEvents, setCurrentYearEvents] = useState<RawEvent[] | null>(null);
   const [previousYearEvents, setPreviousYearEvents] = useState<RawEvent[] | null>(null);
+  const [olderYearEvents, setOlderYearEvents] = useState<RawEvent[] | null>(null);
 
   // Inventory
   const [inventoryLeft, setInventoryLeft] = useState<number | null>(null);
@@ -653,45 +656,54 @@ export default function DashboardPage() {
       setErr(null);
       try {
         const qs = sku ? `&sku=${encodeURIComponent(sku)}` : "";
-        const [currentResponse, previousResponse] = await Promise.all([
+        const [currentResponse, previousResponse, olderResponse] = await Promise.all([
           fetch(`/api/metrics/orders-per-week?year=${currentYear}&fixed=1${qs}`, { cache: "no-store" }),
           fetch(`/api/metrics/orders-per-week?year=${previousYear}&fixed=1${qs}`, { cache: "no-store" }),
+          fetch(`/api/metrics/orders-per-week?year=${olderYear}&fixed=1${qs}`, { cache: "no-store" }),
         ]);
         const currentJson = await currentResponse.json();
         const previousJson = await previousResponse.json();
+        const olderJson = await olderResponse.json();
         if (!currentResponse.ok || !currentJson.ok) throw new Error(currentJson?.error || `Fehler ${currentYear}`);
         if (!previousResponse.ok || !previousJson.ok) throw new Error(previousJson?.error || `Fehler ${previousYear}`);
+        if (!olderResponse.ok || !olderJson.ok) throw new Error(olderJson?.error || `Fehler ${olderYear}`);
         setCurrentYearData(currentJson.points as Point[]);
         setPreviousYearData(previousJson.points as Point[]);
+        setOlderYearData(olderJson.points as Point[]);
       } catch (e: any) {
         setErr(e.message);
       } finally {
         setLoading(false);
       }
     })();
-  }, [sku, currentYear, previousYear]);
+  }, [sku, currentYear, previousYear, olderYear]);
 
   // Events je Jahr laden
   useEffect(() => {
     (async () => {
       try {
-        const [currentResponse, previousResponse] = await Promise.all([
+        const [currentResponse, previousResponse, olderResponse] = await Promise.all([
           fetch(`/api/events?year=${currentYear}`, { cache: "no-store" }),
           fetch(`/api/events?year=${previousYear}`, { cache: "no-store" }),
+          fetch(`/api/events?year=${olderYear}`, { cache: "no-store" }),
         ]);
         const currentJson = await currentResponse.json();
         const previousJson = await previousResponse.json();
+        const olderJson = await olderResponse.json();
         if (!currentResponse.ok || currentJson.error) throw new Error(currentJson?.error || `Events ${currentYear} Fehler`);
         if (!previousResponse.ok || previousJson.error) throw new Error(previousJson?.error || `Events ${previousYear} Fehler`);
+        if (!olderResponse.ok || olderJson.error) throw new Error(olderJson?.error || `Events ${olderYear} Fehler`);
         setCurrentYearEvents(currentJson.events as RawEvent[]);
         setPreviousYearEvents(previousJson.events as RawEvent[]);
+        setOlderYearEvents(olderJson.events as RawEvent[]);
       } catch (e) {
         console.warn("Events laden:", e);
         setCurrentYearEvents([]);
         setPreviousYearEvents([]);
+        setOlderYearEvents([]);
       }
     })();
-  }, [currentYear, previousYear]);
+  }, [currentYear, previousYear, olderYear]);
 
   // Inventory laden wenn SKU gesetzt
   useEffect(() => {
@@ -719,8 +731,9 @@ export default function DashboardPage() {
   const yMax = useMemo(() => {
     const currentMax = currentYearData ? Math.max(0, ...currentYearData.map((p) => p.total)) : 0;
     const previousMax = previousYearData ? Math.max(0, ...previousYearData.map((p) => p.total)) : 0;
-    return Math.max(currentMax, previousMax);
-  }, [currentYearData, previousYearData]);
+    const olderMax = olderYearData ? Math.max(0, ...olderYearData.map((p) => p.total)) : 0;
+    return Math.max(currentMax, previousMax, olderMax);
+  }, [currentYearData, previousYearData, olderYearData]);
 
   const currentEventMap = useMemo<EventsForYear | null>(
     () => (currentYearData && currentYearEvents ? buildEventMappings(currentYearData, currentYearEvents, todayISO) : null),
@@ -730,6 +743,11 @@ export default function DashboardPage() {
   const previousEventMap = useMemo<EventsForYear | null>(
     () => (previousYearData && previousYearEvents ? buildEventMappings(previousYearData, previousYearEvents, todayISO) : null),
     [previousYearData, previousYearEvents, todayISO]
+  );
+
+  const olderEventMap = useMemo<EventsForYear | null>(
+    () => (olderYearData && olderYearEvents ? buildEventMappings(olderYearData, olderYearEvents, todayISO) : null),
+    [olderYearData, olderYearEvents, todayISO]
   );
 
   // Aktuelle ISO-Woche/Jahr
@@ -899,7 +917,7 @@ export default function DashboardPage() {
       {loading && <div>lädt…</div>}
       {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
 
-      {currentYearData && previousYearData && (
+      {currentYearData && previousYearData && olderYearData && (
         <>
           <YearChart
             data={currentYearData}
@@ -917,6 +935,14 @@ export default function DashboardPage() {
             yMax={yMax}
             sku={sku}
             events={previousEventMap}
+            currentIso={currentIso}
+          />
+          <YearChart
+            data={olderYearData}
+            year={olderYear}
+            yMax={yMax}
+            sku={sku}
+            events={olderEventMap}
             currentIso={currentIso}
           />
         </>
