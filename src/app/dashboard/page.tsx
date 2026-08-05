@@ -184,6 +184,22 @@ function addWeeksToISO(isoYear: number, isoWeek: number, add: number) {
   return { year: monday.getUTCFullYear(), week: iso.isoWeek };
 }
 
+function positiveGrowthFactor(
+  current: Map<number, number>,
+  previous: Map<number, number>,
+  currentWeek: number,
+): number {
+  let currentUnits = 0;
+  let previousUnits = 0;
+  for (let week = 1; week < currentWeek; week++) {
+    currentUnits += Math.max(0, current.get(week) || 0);
+    previousUnits += Math.max(0, previous.get(week) || 0);
+  }
+  if (previousUnits <= 0 || currentUnits <= previousUnits) return 1;
+  const stabilizationUnits = 100;
+  return (currentUnits + stabilizationUnits) / (previousUnits + stabilizationUnits);
+}
+
 /* ===== Einzeljahres-Chart ===== */
 function YearChart({
   data,
@@ -194,6 +210,7 @@ function YearChart({
   prevYearWeekTotals,
   currentIso,
   inventoryLeft,
+  recent30Units,
 }: {
   data: Point[];
   year: number;
@@ -203,6 +220,7 @@ function YearChart({
   prevYearWeekTotals?: Map<number, number> | null;
   currentIso?: { year: number; week: number } | null;
   inventoryLeft?: number | null;
+  recent30Units?: number;
 }) {
   const eventsByWeek = useMemo(() => {
     const m = new Map<number, { name: string; dateISO: string }[]>();
@@ -301,10 +319,16 @@ function YearChart({
 
     let weeks = 0;
     let hitWeekKw: number | null = null;
+    const fallbackWeeklyDemand = Math.max(0, Number(recent30Units || 0)) / 30 * 7;
+    const growthFactor = prevYearWeekTotals
+      ? positiveGrowthFactor(currentYearWeekTotals, prevYearWeekTotals, currentIso.week)
+      : 1;
+    const demandWithFallback = (seasonal: number, applyGrowth: boolean) =>
+      seasonal > 0 ? seasonal * (applyGrowth ? growthFactor : 1) : fallbackWeeklyDemand;
 
     if (prevYearWeekTotals) {
       for (let w = currentIso.week + 1; w <= 53; w++) {
-        const s = Math.max(0, prevYearWeekTotals.get?.(w) ?? 0);
+        const s = demandWithFallback(Math.max(0, prevYearWeekTotals.get?.(w) ?? 0), true);
         remaining -= s;
         weeks += 1;
         if (remaining <= 0) {
@@ -316,7 +340,7 @@ function YearChart({
 
     if (remaining > 0) {
       for (let w = 1; w <= 53; w++) {
-        const s = Math.max(0, currentYearWeekTotals.get(w) ?? 0);
+        const s = demandWithFallback(Math.max(0, currentYearWeekTotals.get(w) ?? 0), false);
         remaining -= s;
         weeks += 1;
         if (remaining <= 0) {
@@ -328,7 +352,7 @@ function YearChart({
 
     if (remaining > 0) return { weeks: -1, weekKw: null };
     return { weeks, weekKw: hitWeekKw };
-  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, currentYearWeekTotals]);
+  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, currentYearWeekTotals, recent30Units]);
 
   const oosTextAndColor = useMemo(() => {
     if (year !== currentIso?.year || !sku || inventoryLeft == null) return null;
@@ -735,6 +759,7 @@ export default function DashboardPage() {
   const [currentYearData, setCurrentYearData] = useState<Point[] | null>(null);
   const [previousYearData, setPreviousYearData] = useState<Point[] | null>(null);
   const [olderYearData, setOlderYearData] = useState<Point[] | null>(null);
+  const [currentRecent30Units, setCurrentRecent30Units] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -750,10 +775,6 @@ export default function DashboardPage() {
   // Inventory
   const [inventoryLeft, setInventoryLeft] = useState<number | null>(null);
   const [inventoryErr, setInventoryErr] = useState<string | null>(null);
-  const selectedProduct = useMemo(
-    () => skus?.find((option) => option.value === sku) || null,
-    [skus, sku],
-  );
 
   // Heute als UTC-ISO
   const todayISO = useMemo(() => {
@@ -806,6 +827,7 @@ export default function DashboardPage() {
         if (!previousResponse.ok || !previousJson.ok) throw new Error(previousJson?.error || `Fehler ${previousYear}`);
         if (!olderResponse.ok || !olderJson.ok) throw new Error(olderJson?.error || `Fehler ${olderYear}`);
         setCurrentYearData(currentJson.points as Point[]);
+        setCurrentRecent30Units(Math.max(0, Number(currentJson.recent30Units || 0)));
         setPreviousYearData(previousJson.points as Point[]);
         setOlderYearData(olderJson.points as Point[]);
       } catch (e: any) {
@@ -914,8 +936,15 @@ export default function DashboardPage() {
     if (!currentIso || !previousYearMap || !currentYearMap) return null;
 
     type YearTag = "previous" | "current";
-    const demandOf = (tag: YearTag, w: number) =>
-      Math.max(0, (tag === "previous" ? previousYearMap.get(w) : currentYearMap.get(w)) ?? 0);
+    const fallbackWeeklyDemand = Math.max(0, currentRecent30Units) / 30 * 7;
+    const growthFactor = positiveGrowthFactor(currentYearMap, previousYearMap, currentIso.week);
+    const demandOf = (tag: YearTag, w: number) => {
+      const seasonalDemand = Math.max(0, (tag === "previous" ? previousYearMap.get(w) : currentYearMap.get(w)) ?? 0);
+      // Nullwochen sind bei jungen Listings und OOS-Phasen keine belastbare SaisonalitÃ¤t.
+      return seasonalDemand > 0
+        ? seasonalDemand * (tag === "previous" ? growthFactor : 1)
+        : fallbackWeeklyDemand;
+    };
 
     let remaining = inventoryLeft;
     let w = currentIso.week;
@@ -951,7 +980,7 @@ export default function DashboardPage() {
       newOOSWeek: newOOS.week,
       newOOSYear: newOOS.year,
     };
-  }, [sku, inventoryLeft, currentIso, previousYearMap, currentYearMap]);
+  }, [sku, inventoryLeft, currentIso, previousYearMap, currentYearMap, currentRecent30Units]);
 
   // Countdown (optional)
   type UpcomingEvent = RawEvent & { days: number };
@@ -976,18 +1005,6 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8" style={{ fontFamily: "system-ui, sans-serif" }}>
-      {selectedProduct?.imageUrl && (
-        <div className="mb-4 flex justify-center">
-          <div className="flex h-32 w-32 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
-            <img
-              src={selectedProduct.imageUrl}
-              alt={selectedProduct.productName || `Amazon-Produkt ${selectedProduct.asin || selectedProduct.label}`}
-              className="h-full w-full object-contain"
-              referrerPolicy="no-referrer"
-            />
-          </div>
-        </div>
-      )}
       {/* PAGE-HEADER */}
       <div className="mb-4 md:flex md:items-start md:justify-between md:gap-6">
         <div className="flex-1">
@@ -1073,6 +1090,7 @@ export default function DashboardPage() {
             prevYearWeekTotals={previousYearMap}
             currentIso={currentIso}
             inventoryLeft={inventoryLeft}
+            recent30Units={currentRecent30Units}
           />
           <YearChart
             data={previousYearData}

@@ -50,6 +50,10 @@ function getISOYearWeek(d: Date): { year: number; week: number } {
   return { year, week };
 }
 
+function isoWeeksInYear(year: number): number {
+  return getISOYearWeek(new Date(Date.UTC(year, 11, 28))).week;
+}
+
 // Montag/Sonntag (UTC) für ISO-Jahr/Woche
 function isoWeekStartEndUTC(year: number, week: number): { start: Date; end: Date } {
   const jan4 = new Date(Date.UTC(year, 0, 4));
@@ -72,9 +76,17 @@ export async function GET(req: NextRequest) {
     }
     const url = new URL(req.url);
     const year = Number(url.searchParams.get("year") ?? new Date().getUTCFullYear());
-    const fixed = url.searchParams.get("fixed") === "1";
     const debug = url.searchParams.get("debug") === "1";
     const sku = (url.searchParams.get("sku") || "").trim();
+    const todayISO = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/Berlin",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    const recent30StartDate = new Date(`${todayISO}T12:00:00Z`);
+    recent30StartDate.setUTCDate(recent30StartDate.getUTCDate() - 29);
+    const recent30Start = recent30StartDate.toISOString().slice(0, 10);
 
     const sb = supa();
 
@@ -113,12 +125,15 @@ export async function GET(req: NextRequest) {
     const byMonth = Array.from({ length: 12 }, () => 0);
     let usedRows = 0;
     let sumTotal = 0;
+    let recent30Units = 0;
 
     for (const row of rows) {
       const d = parseUTC(row.purchase_date_berlin);   // "YYYY-MM-DD" → Mitternacht UTC
       const qty = Number(row.quantity ?? 0);
       if (!d || !isFinite(qty)) continue;
 
+      const dateISO = d.toISOString().slice(0, 10);
+      if (dateISO >= recent30Start && dateISO <= todayISO) recent30Units += Math.max(0, qty);
       const { year: isoYear, week } = getISOYearWeek(d);
       if (isoYear !== year) continue;
 
@@ -128,8 +143,8 @@ export async function GET(req: NextRequest) {
       byMonth[d.getUTCMonth()] += qty; // 0..11
     }
 
-    // fix 52 Wochen (KW1..KW52)
-    const weeks = fixed ? 52 : 52;
+    // Der 28. Dezember liegt immer in der letzten ISO-Woche des Jahres.
+    const weeks = isoWeeksInYear(year);
     const points = Array.from({ length: weeks }, (_, i) => {
       const wk = i + 1;
       const { start, end } = isoWeekStartEndUTC(year, wk);
@@ -149,6 +164,8 @@ export async function GET(req: NextRequest) {
       ok: true,
       year,
       points,
+      recent30Units,
+      recent30Window: { start: recent30Start, end: todayISO },
       meta: debug ? {
         fetchedRows: rows.length,
         usedRows,
