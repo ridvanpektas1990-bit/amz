@@ -27,6 +27,14 @@ export function readTenantCookie(value: string | undefined, secret: string) {
 
 export function tenantIdFromRequest(req: NextRequest) {
   const secret = process.env.LWA_CLIENT_SECRET;
-  if (!secret) return null;
-  return readTenantCookie(req.cookies.get("amz_tenant")?.value, secret);
+  const cookieTenant = secret
+    ? readTenantCookie(req.cookies.get("amz_tenant")?.value, secret)
+    : null;
+  if (cookieTenant) return cookieTenant;
+
+  // AusschlieÃŸlich fÃ¼r localhost: Produktions-Cookies sind an app.amz-profit.com gebunden.
+  if (process.env.NODE_ENV === "development") {
+    return process.env.LOCAL_TENANT_ID?.trim() || null;
+  }
+  return null;
 }
