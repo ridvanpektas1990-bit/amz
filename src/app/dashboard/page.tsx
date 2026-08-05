@@ -14,6 +14,7 @@ import {
   LabelList,
   Customized, // <— wichtig für den Hover-Hotspot
 } from "recharts";
+import InventoryOverviewTable from "@/components/InventoryOverviewTable";
 
 /* ===== Types ===== */
 type Point = {
@@ -947,6 +948,7 @@ export default function DashboardPage() {
           />
         </>
       )}
+      <InventoryOverviewTable />
     </div>
   );
 }
