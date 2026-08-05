@@ -7,6 +7,8 @@ type StockStatus = "out" | "critical" | "warning" | "healthy" | "no_sales";
 type InventoryItem = {
   asin: string;
   sku: string;
+  imageUrl: string | null;
+  productName: string | null;
   marketplace: string;
   snapshotDate: string | null;
   available: number;
@@ -60,14 +62,36 @@ function formatDate(value: string | null): string {
   return new Intl.DateTimeFormat("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
 }
 
+function ProductImage({ item }: { item: InventoryItem }) {
+  const [failed, setFailed] = useState(false);
+  const showImage = item.imageUrl && !failed;
+
+  return (
+    <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      {showImage ? (
+        <img
+          src={item.imageUrl || ""}
+          alt={item.productName || `Amazon-Produkt ${item.asin}`}
+          className="h-full w-full object-contain p-1"
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span className="px-1 text-center text-[10px] font-semibold uppercase tracking-wide text-slate-400">Kein Bild</span>
+      )}
+    </div>
+  );
+}
+
 function downloadCsv(items: InventoryItem[]) {
   const header = [
-    "ASIN", "SKU", "Status", "Verfügbar", "Gesamt", "Reserviert", "Inbound",
+    "Produkt", "ASIN", "SKU", "Status", "Verfügbar", "Gesamt", "Reserviert", "Inbound",
     "Verkäufe 30T", "Verkäufe 90T", "Ø 30T pro Tag", "Prognose pro Tag",
     "Prognosemethode", "Wachstumsaufschlag %", "Reichweite Tage", "OOS-Datum",
   ];
   const lines = items.map((item) => [
-    item.asin, item.sku, statusMeta[item.status].label, item.available, item.total, item.reserved,
+    item.productName || "", item.asin, item.sku, statusMeta[item.status].label, item.available, item.total, item.reserved,
     item.inbound, item.units30, item.units90, item.dailySales30, item.forecastDailySales,
     forecastLabels[item.forecastMethod], item.growthPercent,
     item.daysOfCover ?? "", item.estimatedOosDate ?? "",
@@ -245,7 +269,7 @@ export default function InventoryOverviewTable() {
       {!loading && !error && (
         <>
           <div className="overflow-x-auto">
-            <table className="min-w-[1080px] w-full border-collapse text-left text-sm">
+            <table className="min-w-[1180px] w-full border-collapse text-left text-sm">
               <thead className="bg-white text-xs uppercase tracking-wide text-slate-500">
                 <tr className="border-b border-slate-200">
                   <th className="px-5 py-3 font-semibold">Produkt</th>
@@ -265,15 +289,25 @@ export default function InventoryOverviewTable() {
                   return (
                     <tr key={`${item.asin}-${item.sku}`} className="border-b border-slate-100 hover:bg-slate-50/80">
                       <td className="px-5 py-4">
-                        <a
-                          href={`https://www.amazon.de/dp/${encodeURIComponent(item.asin)}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="font-semibold text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-700"
-                        >
-                          {item.asin}
-                        </a>
-                        <div className="mt-1 max-w-[220px] truncate font-mono text-xs text-slate-500" title={item.sku}>{item.sku}</div>
+                        <div className="flex min-w-[310px] items-center gap-3">
+                          <ProductImage item={item} />
+                          <div className="min-w-0">
+                            {item.productName && (
+                              <div className="mb-1 max-w-[260px] truncate text-sm font-medium text-slate-800" title={item.productName}>
+                                {item.productName}
+                              </div>
+                            )}
+                            <a
+                              href={`https://www.amazon.de/dp/${encodeURIComponent(item.asin)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-semibold text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-700"
+                            >
+                              {item.asin}
+                            </a>
+                            <div className="mt-1 max-w-[240px] truncate font-mono text-xs text-slate-500" title={item.sku}>{item.sku}</div>
+                          </div>
+                        </div>
                       </td>
                       <td className="px-4 py-4">
                         <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${meta.badge}`}>
