@@ -2,7 +2,22 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 import { loadCatalogMetadata, type CatalogMetadata } from "@/lib/amazon-catalog";
-import { calculatePositiveGrowthFactor, chooseForecastDemand } from "@/lib/inventory-forecast";
+import {
+  FORECAST_GROWTH_PRIOR_UNITS,
+  calculatePositiveGrowthFactor,
+  chooseForecastDemand,
+  projectDailyOos,
+} from "@/lib/inventory-forecast";
+import {
+  classifyStockStatus,
+  effectiveInventoryUnits,
+} from "@/lib/inventory-overview";
+import { loadSkuSalesLinkedToOrders } from "@/lib/amazon-order-units";
+import {
+  dailyUnitsSeriesFromMap,
+  recentSalesTempoFromDaily,
+  RECENT_TEMPO_LOOKBACK_DAYS,
+} from "@/lib/recent-sales-tempo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -94,6 +109,8 @@ export async function GET(req: NextRequest) {
     const currentYear = todayDate.getUTCFullYear();
     const start30 = new Date(`${today}T00:00:00Z`);
     start30.setUTCDate(start30.getUTCDate() - 29);
+    const startTempo = new Date(`${today}T00:00:00Z`);
+    startTempo.setUTCDate(startTempo.getUTCDate() - (RECENT_TEMPO_LOOKBACK_DAYS - 1));
     const start90 = new Date(`${today}T00:00:00Z`);
     start90.setUTCDate(start90.getUTCDate() - 89);
     const historyStart = `${currentYear - 1}-01-01`;
@@ -132,23 +149,21 @@ export async function GET(req: NextRequest) {
       });
 
     const salesRows: SalesRow[] = [];
-    const pageSize = 1000;
     if (inventorySkus.length) {
-      for (let from = 0; ; from += pageSize) {
-        const { data, error } = await sb
-          .from("vw_amazon_fees_orders")
-          .select("seller_sku,purchase_date_berlin,quantity")
-          .eq("tenant_id", tenantId)
-          .eq("marketplace", marketplace)
-          .in("seller_sku", inventorySkus)
-          .gte("purchase_date_berlin", historyStart)
-          .lte("purchase_date_berlin", today)
-          .range(from, from + pageSize - 1);
-
-        if (error) throw new Error(`Sales page ${from}: ${error.message}`);
-        if (!data?.length) break;
-        salesRows.push(...(data as SalesRow[]));
-        if (data.length < pageSize) break;
+      const linked = await loadSkuSalesLinkedToOrders({
+        sb,
+        tenantId,
+        marketplace,
+        startISO: historyStart,
+        endISO: today,
+        sellerSkus: inventorySkus,
+      });
+      for (const row of linked) {
+        salesRows.push({
+          seller_sku: row.sellerSku,
+          purchase_date_berlin: row.dateISO,
+          quantity: row.quantity,
+        });
       }
     }
 
@@ -158,6 +173,7 @@ export async function GET(req: NextRequest) {
       currentComparable: number;
       previousComparable: number;
       byMonth: Map<string, number>;
+      byDate30: Map<string, number>;
     };
     const salesBySku = new Map<string, SalesAggregate>();
     const start30ISO = isoDate(start30);
@@ -173,9 +189,13 @@ export async function GET(req: NextRequest) {
         currentComparable: 0,
         previousComparable: 0,
         byMonth: new Map<string, number>(),
+        byDate30: new Map<string, number>(),
       };
       if (date >= start90ISO) aggregate.units90 += quantity;
-      if (date >= start30ISO) aggregate.units30 += quantity;
+      if (date >= start30ISO) {
+        aggregate.units30 += quantity;
+        aggregate.byDate30.set(date, (aggregate.byDate30.get(date) || 0) + quantity);
+      }
       if (currentComparisonEnd && date >= currentComparisonStart && date <= currentComparisonEnd) {
         aggregate.currentComparable += quantity;
       }
@@ -200,9 +220,16 @@ export async function GET(req: NextRequest) {
           currentComparable: 0,
           previousComparable: 0,
           byMonth: new Map<string, number>(),
+          byDate30: new Map<string, number>(),
         };
         const available = Math.max(0, number(row.inventory_left));
-        const dailySales30 = sales.units30 / 30;
+        const inbound = Math.max(0, number(row.inbound_total));
+        const effectiveUnits = effectiveInventoryUnits(available, inbound);
+        const recentTempo = recentSalesTempoFromDaily(
+          dailyUnitsSeriesFromMap(start30ISO, today, sales.byDate30),
+          RECENT_TEMPO_LOOKBACK_DAYS,
+        );
+        const dailySales30 = recentTempo.dailyRate;
         // Stabilisiert kleine Vorjahresbasen, ohne Wachstum großer Listings nennenswert zu verwässern.
         const growthFactor = calculatePositiveGrowthFactor(
           sales.currentComparable,
@@ -231,46 +258,27 @@ export async function GET(req: NextRequest) {
           };
         };
 
-        let remaining = available;
-        let daysOfCover: number | null = available <= 0 ? 0 : null;
-        let seasonalDays = 0;
-        let fallbackDays = 0;
-        let hasDemand = false;
         const currentForecast = forecastDemandForDate(todayDate);
-        let forecastDailySales = currentForecast.demand;
-
-        if (available <= 0 && currentForecast.demand > 0) {
-          hasDemand = true;
-          if (currentForecast.seasonal) seasonalDays = 1;
-          else fallbackDays = 1;
-        }
-
-        for (let day = 0; day < 730 && remaining > 0; day++) {
+        const demandForDayOffset = (day: number) => {
           const forecastDate = new Date(todayDate);
           forecastDate.setUTCDate(forecastDate.getUTCDate() + day);
-          const forecast = forecastDemandForDate(forecastDate);
-          const dailyDemand = forecast.demand;
+          return forecastDemandForDate(forecastDate);
+        };
 
-          if (dailyDemand <= 0) continue;
-          hasDemand = true;
-          if (forecast.seasonal) seasonalDays += 1;
-          else fallbackDays += 1;
-          remaining -= dailyDemand;
-          if (remaining <= 0) daysOfCover = day + 1;
-        }
+        const onHand = projectDailyOos({
+          inventory: available,
+          todayDemand: currentForecast,
+          demandForDayOffset,
+        });
+        const withInbound = projectDailyOos({
+          inventory: effectiveUnits,
+          todayDemand: currentForecast,
+          demandForDayOffset,
+        });
 
-        let forecastMethod: "seasonal" | "hybrid" | "recent" | "none" = "none";
-        if (seasonalDays > 0 && fallbackDays > 0) forecastMethod = "hybrid";
-        else if (seasonalDays > 0) forecastMethod = "seasonal";
-        else if (fallbackDays > 0) forecastMethod = "recent";
-        if (!hasDemand && available > 0) daysOfCover = null;
-
-        let status: "out" | "critical" | "warning" | "healthy" | "no_sales";
-        if (available <= 0) status = "out";
-        else if (daysOfCover === null) status = "no_sales";
-        else if (daysOfCover <= 30) status = "critical";
-        else if (daysOfCover <= 60) status = "warning";
-        else status = "healthy";
+        const daysOfCover = withInbound.daysOfCover;
+        const daysOfCoverOnHand = onHand.daysOfCover;
+        const status = classifyStockStatus(available, inbound, daysOfCover);
 
         return {
           asin,
@@ -283,18 +291,22 @@ export async function GET(req: NextRequest) {
           total: Math.max(0, number(row.inventory_total)),
           reserved: Math.max(0, number(row.reserved_total)),
           pendingCustomerOrders: Math.max(0, number(row.pending_customer_orders)),
-          inbound: Math.max(0, number(row.inbound_total)),
+          inbound,
           units30: sales.units30,
           units90: sales.units90,
           dailySales30: Number(dailySales30.toFixed(2)),
-          forecastDailySales: Number(forecastDailySales.toFixed(2)),
-          forecastMethod,
+          recentTempoDays: recentTempo.activeDays,
+          recentTempoTruncated: recentTempo.truncated,
+          forecastDailySales: Number(withInbound.forecastDailySales.toFixed(2)),
+          forecastMethod: withInbound.forecastMethod,
           growthFactor: Number(growthFactor.toFixed(3)),
           growthPercent,
           comparisonCurrentUnits: sales.currentComparable,
           comparisonPreviousUnits: sales.previousComparable,
           daysOfCover,
           estimatedOosDate: daysOfCover === null ? null : addDays(today, daysOfCover),
+          daysOfCoverOnHand,
+          estimatedOosDateOnHand: daysOfCoverOnHand === null ? null : addDays(today, daysOfCoverOnHand),
           status,
         };
       });
@@ -304,13 +316,18 @@ export async function GET(req: NextRequest) {
         ok: true,
         generatedAt: new Date().toISOString(),
         marketplace,
-        salesWindow: { days: 30, start: start30ISO, end: today },
+        salesWindow: {
+          days: RECENT_TEMPO_LOOKBACK_DAYS,
+          start: isoDate(startTempo),
+          end: today,
+          units30Start: start30ISO,
+        },
         seasonalHistory: { start: historyStart, end: today },
         growthComparison: {
           current: { start: currentComparisonStart, end: currentComparisonEnd },
           previous: { start: previousComparisonStart, end: previousComparisonEnd },
           positiveGrowthOnly: true,
-          stabilizationUnits: 100,
+          stabilizationUnits: FORECAST_GROWTH_PRIOR_UNITS,
         },
         snapshotDate: items.map((item) => item.snapshotDate).filter(Boolean).sort().at(-1) || null,
         items,

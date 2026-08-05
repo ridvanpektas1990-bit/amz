@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
 
     const { data, error } = await supabase
       .from("vw_inventory_latest_per_asin_max")
-      .select("inventory_left")
+      .select("inventory_left,inbound_total")
       .eq("tenant_id", tenantId)
       .eq("seller_sku", sku)
       .maybeSingle();
@@ -36,7 +36,22 @@ export async function GET(req: NextRequest) {
     }
 
     const inventory_left = data?.inventory_left ?? null;
-    return NextResponse.json({ ok: true, sku, inventory_left }, { headers: { "cache-control": "no-store" } });
+    const inbound_total = data?.inbound_total ?? null;
+    const available = inventory_left == null ? null : Math.max(0, Number(inventory_left) || 0);
+    const inbound = inbound_total == null ? 0 : Math.max(0, Number(inbound_total) || 0);
+    const inventory_effective =
+      available == null ? null : available + inbound;
+
+    return NextResponse.json(
+      {
+        ok: true,
+        sku,
+        inventory_left,
+        inbound_total: inbound,
+        inventory_effective,
+      },
+      { headers: { "cache-control": "no-store" } },
+    );
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? "unknown error" }, { status: 500 });
   }

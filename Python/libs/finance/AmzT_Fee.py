@@ -75,10 +75,13 @@ WORKERS         = int(os.getenv("SPAPI_WORKERS", "1"))  # 1 = sequentiell
 
 # Optional: CSV-Audits
 SKIP_AUDIT_CSV = os.getenv("SKIP_AUDIT_CSV", "1") == "1"
-# Detailed fee lines are only an optional audit trail. The application reads the
-# aggregated amazon_fees data, so avoid duplicating every financial event by
-# default. Set SKIP_FEE_LINES=0 explicitly when a temporary audit is required.
-SKIP_FEE_LINES = os.getenv("SKIP_FEE_LINES", "1") == "1"
+# Logistics tool: fee tables are dropped / unused. Skip all Supabase fee writes
+# by default (amazon_fees, amazon_account_fees, amazon_fee_lines).
+# Set SKIP_FEE_WRITES=0 only if you temporarily need finance tables again.
+SKIP_FEE_WRITES = os.getenv("SKIP_FEE_WRITES", "1") != "0"
+# Line-level fee audit only — kept off even when SKIP_FEE_WRITES=0 unless
+# SKIP_FEE_LINES=0 for a temporary finance audit.
+SKIP_FEE_LINES = os.getenv("SKIP_FEE_LINES", "1") != "0"
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "output"
@@ -114,7 +117,8 @@ ACCOUNT_ON_CONFLICT = os.getenv(
 
 TENANT_ID = (os.getenv("TENANT_ID", "default") or "default").strip()
 
-print(f"# DEBUG → fee_lines mapping: type_col={FEE_LINES_TYPE_COL} | category_col={FEE_LINES_CATEGORY_COL}")
+print(f"# DEBUG → SKIP_FEE_WRITES={SKIP_FEE_WRITES} (fee tables unused for logistics)")
+print(f"# DEBUG → SKIP_FEE_LINES={SKIP_FEE_LINES}")
 print(f"# DEBUG → TENANT_ID={TENANT_ID}")
 print(f"# DEBUG → FEES table='{FEES_TABLE}', ACCOUNT_FEES table='{ACCOUNT_TABLE}'")
 
@@ -1143,78 +1147,83 @@ def run():
                 w.writerows(unknown_rows[:UNKNOWN_SAMPLES])
             print(f"{unk_path.name}  ({len(unknown_rows[:UNKNOWN_SAMPLES])} rows)")
 
-    # --- Account-Fees ohne OrderId -------------------------------------------
-    push_account_fees_detail(all_rows, marketplace_code=MP_CODE)
+    if SKIP_FEE_WRITES:
+        print("# Fee-Writes übersprungen (SKIP_FEE_WRITES=1) — amazon_fees/account_fees/fee_lines nicht für Logistik")
+    else:
+        # --- Account-Fees ohne OrderId ---------------------------------------
+        push_account_fees_detail(all_rows, marketplace_code=MP_CODE)
 
-    # --- Audit: fee_lines -----------------------------------------------------
-    if not SKIP_FEE_LINES:
-        push_fee_lines(all_rows, marketplace=MP_CODE)
+        # --- amazon_fee_lines: audit-only — skipped unless SKIP_FEE_LINES=0
+        if not SKIP_FEE_LINES:
+            push_fee_lines(all_rows, marketplace=MP_CODE)
+        else:
+            print("# Fee-Lines übersprungen (SKIP_FEE_LINES=1)")
 
-    # --- Upsert Aggregat (Payment/Refund) → **nur** details_by_category_signed
-    rows_by_sku = []
-    skipped_account_level = 0
+        # --- Upsert Aggregat (Payment/Refund) → details_by_category_signed
+        rows_by_sku = []
+        skipped_account_level = 0
 
-    for (oid, seller_sku, asin_val, cur), cat_map_all in signed_by_cat_key_all.items():
-        if not oid:
-            skipped_account_level += 1
-            continue
-
-        # Split in Payment vs Refund anhand Category-Präfix
-        pay_cat: Dict[str, Decimal] = {}
-        ref_cat: Dict[str, Decimal] = {}
-        for catkey, s in cat_map_all.items():
-            category = catkey.split(":", 1)[0]
-            if is_refund_category(category):
-                ref_cat[catkey] = s
-            else:
-                pay_cat[catkey] = s
-
-        for phase, cat_map in (("Payment", pay_cat), ("Refund", ref_cat)):
-            if not cat_map:
+        for (oid, seller_sku, asin_val, cur), cat_map_all in signed_by_cat_key_all.items():
+            if not oid:
+                skipped_account_level += 1
                 continue
 
-            # fee_total = Summe der Absolutbeträge
-            fee_total_abs = float(sum(abs(v) for v in cat_map.values()))
+            # Split in Payment vs Refund anhand Category-Präfix
+            pay_cat: Dict[str, Decimal] = {}
+            ref_cat: Dict[str, Decimal] = {}
+            for catkey, s in cat_map_all.items():
+                category = catkey.split(":", 1)[0]
+                if is_refund_category(category):
+                    ref_cat[catkey] = s
+                else:
+                    pay_cat[catkey] = s
 
-            # letzte Posted-Zeit für diese SKU/Phase (Fallback = Monatsanfang)
-            keyp = (oid, seller_sku or "_ORDER_LEVEL_", asin_val or "", cur or "", phase)
-            last_dt = last_date_per_sku_phase.get(
-                keyp,
-                datetime(ORDERS_YEAR, ORDERS_MONTH, 1, tzinfo=TZ).astimezone(timezone.utc)
-            )
+            for phase, cat_map in (("Payment", pay_cat), ("Refund", ref_cat)):
+                if not cat_map:
+                    continue
 
-            # Menge (falls vorhanden)
-            qty_key = (oid, seller_sku or "_ORDER_LEVEL_", asin_val or "", phase)
-            qty_val = int(qty_by_key_phase.get(qty_key) or 0)
+                # fee_total = Summe der Absolutbeträge
+                fee_total_abs = float(sum(abs(v) for v in cat_map.values()))
 
-            # **Nur** die flache Map speichern (unter dem bekannten Schlüssel-Namen)
-            fee_breakdown_min = {
-                "details_by_category_signed": {k: float(v) for k, v in cat_map.items()}
-            }
+                # letzte Posted-Zeit für diese SKU/Phase (Fallback = Monatsanfang)
+                keyp = (oid, seller_sku or "_ORDER_LEVEL_", asin_val or "", cur or "", phase)
+                last_dt = last_date_per_sku_phase.get(
+                    keyp,
+                    datetime(ORDERS_YEAR, ORDERS_MONTH, 1, tzinfo=TZ).astimezone(timezone.utc)
+                )
 
-            row = {
-                "amazon_order_id": oid,
-                "seller_sku": seller_sku or "_ORDER_LEVEL_",
-                "asin": asin_val or None,
-                "marketplace": MP_CODE,
-                "currency": cur or "EUR",
-                "fee_total": fee_total_abs,
-                "fee_breakdown": fee_breakdown_min,  # <- minimal!
-                "transaction_phase": phase,
-                "last_posted_at": iso_z(last_dt),
-                "period_year": ORDERS_YEAR,
-                "period_month": ORDERS_MONTH,
-                "tenant_id": TENANT_ID,
-                "quantity": qty_val,
-            }
-            rows_by_sku.append(row)
+                # Menge (falls vorhanden)
+                qty_key = (oid, seller_sku or "_ORDER_LEVEL_", asin_val or "", phase)
+                qty_val = int(qty_by_key_phase.get(qty_key) || 0)
 
-    if skipped_account_level:
-        print(f"# Hinweis: {skipped_account_level} account-level Key(s) NICHT nach '{FEES_TABLE}' (keine OrderId).")
+                # **Nur** die flache Map speichern (unter dem bekannten Schlüssel-Namen)
+                fee_breakdown_min = {
+                    "details_by_category_signed": {k: float(v) for k, v in cat_map.items()}
+                }
 
-    upsert_rows(FEES_TABLE, rows_by_sku, FEES_ON_CONFLICT, BATCH_SIZE)
+                row = {
+                    "amazon_order_id": oid,
+                    "seller_sku": seller_sku or "_ORDER_LEVEL_",
+                    "asin": asin_val or None,
+                    "marketplace": MP_CODE,
+                    "currency": cur or "EUR",
+                    "fee_total": fee_total_abs,
+                    "fee_breakdown": fee_breakdown_min,  # <- minimal!
+                    "transaction_phase": phase,
+                    "last_posted_at": iso_z(last_dt),
+                    "period_year": ORDERS_YEAR,
+                    "period_month": ORDERS_MONTH,
+                    "tenant_id": TENANT_ID,
+                    "quantity": qty_val,
+                }
+                rows_by_sku.append(row)
 
-    print(f"Fertig: {len(rows_by_sku)} Zeilen (Payment/Refund getrennt) in Supabase ({FEES_TABLE}).")
+        if skipped_account_level:
+            print(f"# Hinweis: {skipped_account_level} account-level Key(s) NICHT nach '{FEES_TABLE}' (keine OrderId).")
+
+        upsert_rows(FEES_TABLE, rows_by_sku, FEES_ON_CONFLICT, BATCH_SIZE)
+        print(f"Fertig: {len(rows_by_sku)} Zeilen (Payment/Refund getrennt) in Supabase ({FEES_TABLE}).")
+
     print(f"# Dedupe-Info → promo_dups_skipped={PROMO_DUP_SKIPPED}, refund_scan_used={REFUND_SCAN_USED}")
 
 if __name__ == "__main__":

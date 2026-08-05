@@ -14,8 +14,24 @@ import {
   LabelList,
   Customized, // <— wichtig für den Hover-Hotspot
 } from "recharts";
-import InventoryOverviewTable from "@/components/InventoryOverviewTable";
-import { calculatePositiveGrowthFactor, chooseForecastDemand } from "@/lib/inventory-forecast";
+import {
+  InventoryTableSection,
+} from "@/components/InventoryMvpSection";
+import ShowInactiveListingsToggle from "@/components/ShowInactiveListingsToggle";
+import SyncStatusBanner from "@/components/SyncStatusBanner";
+import { useInventoryOverview } from "@/hooks/useInventoryOverview";
+import {
+  classifyReorderTiming,
+  leadTimeDaysFromSpec,
+  roundUpToCartons,
+  type CartonSpecRow,
+} from "@/lib/carton-specs";
+import { sortByDailySalesDesc } from "@/lib/listing-activity";
+import Link from "next/link";
+import {
+  planArrivalShipmentReorder,
+  projectWeeklyOos,
+} from "@/lib/inventory-forecast";
 
 /* ===== Types ===== */
 type Point = {
@@ -34,6 +50,12 @@ type SkuOption = {
   asin?: string | null;
   imageUrl?: string | null;
   productName?: string | null;
+  units30?: number;
+  units90?: number;
+  dailySales30?: number;
+  available?: number;
+  inbound?: number;
+  active?: boolean;
 };
 
 type RawEvent = { event_name: string; event_date: string }; // YYYY-MM-DD
@@ -134,6 +156,11 @@ function YearTooltip({ active, payload, year, prevYearWeekTotals, events }: any)
   return (
     <div className="rounded-md border bg-white p-2 shadow text-sm">
       <div className="font-medium">KW {p.isoWeek}/{year}</div>
+      {(p.startUtc || p.endUtc) && (
+        <div className="text-xs text-slate-500">
+          {fmt(p.startUtc)} – {fmt(p.endUtc)}
+        </div>
+      )}
       <div>🛍️ {sales} Verkäufe</div>
       {deltaJSX}
       {weekEvents.length > 0 && (
@@ -159,46 +186,6 @@ function RLRightLabel(props: any) {
   );
 }
 
-// ISO: Montag einer ISO-Woche finden
-function isoMondayOfWeek(isoYear: number, isoWeek: number): Date {
-  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
-  const dayNr = (jan4.getUTCDay() + 6) % 7; // Mo=0..So=6
-  const mondayW1 = new Date(jan4);
-  mondayW1.setUTCDate(jan4.getUTCDate() - dayNr);
-  const mondayTarget = new Date(mondayW1);
-  mondayTarget.setUTCDate(mondayW1.getUTCDate() + (isoWeek - 1) * 7);
-  return mondayTarget;
-}
-
-function dateToISOUTC(d: Date): string {
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-// ISO-Woche + N Wochen -> neue ISO (Jahr, KW)
-function addWeeksToISO(isoYear: number, isoWeek: number, add: number) {
-  const monday = isoMondayOfWeek(isoYear, isoWeek);
-  monday.setUTCDate(monday.getUTCDate() + add * 7);
-  const iso = isoWeekFromDateISO(dateToISOUTC(monday));
-  return { year: monday.getUTCFullYear(), week: iso.isoWeek };
-}
-
-function positiveGrowthFactor(
-  current: Map<number, number>,
-  previous: Map<number, number>,
-  currentWeek: number,
-): number {
-  let currentUnits = 0;
-  let previousUnits = 0;
-  for (let week = 1; week < currentWeek; week++) {
-    currentUnits += Math.max(0, current.get(week) || 0);
-    previousUnits += Math.max(0, previous.get(week) || 0);
-  }
-  return calculatePositiveGrowthFactor(currentUnits, previousUnits);
-}
-
 /* ===== Einzeljahres-Chart ===== */
 function YearChart({
   data,
@@ -209,7 +196,10 @@ function YearChart({
   prevYearWeekTotals,
   currentIso,
   inventoryLeft,
+  inventoryOnHand,
+  inventoryInbound = 0,
   recent30Units,
+  recentTempoDays = 14,
 }: {
   data: Point[];
   year: number;
@@ -219,7 +209,10 @@ function YearChart({
   prevYearWeekTotals?: Map<number, number> | null;
   currentIso?: { year: number; week: number } | null;
   inventoryLeft?: number | null;
+  inventoryOnHand?: number | null;
+  inventoryInbound?: number;
   recent30Units?: number;
+  recentTempoDays?: number;
 }) {
   const eventsByWeek = useMemo(() => {
     const m = new Map<number, { name: string; dateISO: string }[]>();
@@ -307,65 +300,31 @@ function YearChart({
     return m;
   }, [data, year, currentIso]);
 
-  // --- OOS-Schätzung ---
+  // --- OOS-Schätzung (shared forecast lib) ---
   const oosForecast = useMemo(() => {
     if (year !== currentIso?.year) return null;
     if (!currentIso) return null;
     if (inventoryLeft == null) return null;
 
-    let remaining = inventoryLeft;
-    if (remaining <= 0) return { weeks: 0, weekKw: currentIso.week };
-
-    let weeks = 0;
-    let hitWeekKw: number | null = null;
-    const fallbackWeeklyDemand = Math.max(0, Number(recent30Units || 0)) / 30 * 7;
-    const growthFactor = prevYearWeekTotals
-      ? positiveGrowthFactor(currentYearWeekTotals, prevYearWeekTotals, currentIso.week)
-      : 1;
-    const demandWithFallback = (seasonal: number, applyGrowth: boolean) =>
-      chooseForecastDemand({
-        seasonalDemand: seasonal,
-        recentDemand: fallbackWeeklyDemand,
-        growthFactor: applyGrowth ? growthFactor : 1,
-      }).demand;
-
-    if (prevYearWeekTotals) {
-      for (let w = currentIso.week + 1; w <= 53; w++) {
-        const s = demandWithFallback(Math.max(0, prevYearWeekTotals.get?.(w) ?? 0), true);
-        remaining -= s;
-        weeks += 1;
-        if (remaining <= 0) {
-          hitWeekKw = w;
-          break;
-        }
-      }
-    }
-
-    if (remaining > 0) {
-      for (let w = 1; w <= 53; w++) {
-        const s = demandWithFallback(Math.max(0, currentYearWeekTotals.get(w) ?? 0), false);
-        remaining -= s;
-        weeks += 1;
-        if (remaining <= 0) {
-          hitWeekKw = w;
-          break;
-        }
-      }
-    }
-
-    if (remaining > 0) return { weeks: -1, weekKw: null };
-    return { weeks, weekKw: hitWeekKw };
-  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, currentYearWeekTotals, recent30Units]);
+    return projectWeeklyOos({
+      inventory: inventoryLeft,
+      currentWeek: currentIso.week,
+      previousYearWeekTotals: prevYearWeekTotals || null,
+      currentYearWeekTotals,
+      recent30Units,
+      recentTempoDays,
+    });
+  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, currentYearWeekTotals, recent30Units, recentTempoDays]);
 
   const oosTextAndColor = useMemo(() => {
     if (year !== currentIso?.year || !sku || inventoryLeft == null) return null;
     if (!oosForecast) return null;
     const { weeks, weekKw } = oosForecast;
-    if (weeks === 0) return { text: "OOS: jetzt", cls: "text-red-600" };
-    if (weeks === -1) return { text: "OOS-Prognose > 1 Jahr", cls: "text-green-600" };
+    if (weeks === 0) return { text: "Jetzt ausverkauft", cls: "text-red-600" };
+    if (weeks === -1) return { text: "Bestand reicht > 1 Jahr", cls: "text-green-600" };
     const cls = weeks <= 4 ? "text-red-600" : weeks <= 8 ? "text-yellow-600" : "text-green-600";
     const kwPart = weekKw ? ` (KW ${weekKw})` : "";
-    return { text: `OOS in ${weeks} ${weeks === 1 ? "Woche" : "Wochen"}${kwPart}`, cls };
+    return { text: `Voraussichtlich leer in ${weeks} ${weeks === 1 ? "Woche" : "Wochen"}${kwPart}`, cls };
   }, [oosForecast, year, currentIso, sku, inventoryLeft]);
 
   /* === Hover-Hotspot + SVG-Tooltip für OOS === */
@@ -386,9 +345,9 @@ function YearChart({
   }, [oosForecast]);
 
   return (
-    <section className="mb-8">
+    <section className="mb-4">
       {/* HEADER: Titel zentriert, links YTD, rechts Lager/OOS */}
-      <div className="grid grid-cols-3 items-start mb-2">
+      <div className="mb-1 grid grid-cols-3 items-start">
         {/* LINKS: YTD */}
         <div className="flex flex-col">
           {year === currentIso?.year && ytd && (
@@ -417,14 +376,21 @@ function YearChart({
           {year}{sku ? ` · ${sku}` : ""}
         </h2>
 
-        {/* RECHTS: Lager/OOS */}
+        {/* RECHTS: Lager/OOS (inkl. Inbound) */}
         {year === currentIso?.year && sku && typeof inventoryLeft === "number" && (
           <div className="justify-self-end text-right">
-            <div className="text-[11px] uppercase tracking-wide text-gray-500">Auf Lager</div>
+            <div className="text-[11px] uppercase tracking-wide text-gray-500">
+              {inventoryInbound > 0 ? "Bestand inkl. Zulauf" : "Auf Lager"}
+            </div>
             <div className="leading-none">
               <span className="text-3xl font-extrabold">{nf.format(inventoryLeft)}</span>
               <span className="ml-1 text-sm font-semibold text-gray-500">Stk</span>
             </div>
+            {inventoryInbound > 0 && typeof inventoryOnHand === "number" && (
+              <div className="mt-0.5 text-[11px] text-sky-700">
+                {nf.format(inventoryOnHand)} verfügbar · +{nf.format(inventoryInbound)} Inbound
+              </div>
+            )}
             {oosTextAndColor && (
               <div className={`mt-1 text-sm font-medium ${oosTextAndColor.cls}`}>
                 {oosTextAndColor.text}
@@ -688,7 +654,17 @@ function SkuProductSelect({
             {selected?.productName || selected?.label || (disabled ? "Produkte werden geladen …" : "Alle Produkte")}
           </span>
           <span className="block truncate text-xs text-slate-500">
-            {selected ? [selected.asin, selected.label].filter(Boolean).join(" · ") : "Gesamten Verkauf anzeigen"}
+            {selected
+              ? [
+                  selected.asin,
+                  selected.label,
+                  typeof selected.dailySales30 === "number"
+                    ? `Ø ${selected.dailySales30.toFixed(1).replace(".", ",")} / Tag`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : "Gesamten Verkauf anzeigen · sortiert nach Absatz"}
           </span>
         </span>
         <svg viewBox="0 0 20 20" aria-hidden="true" className={`h-4 w-4 shrink-0 text-slate-500 transition ${open ? "rotate-180" : ""}`}>
@@ -740,9 +716,20 @@ function SkuProductSelect({
                     />
                   ) : <span className="text-[9px] font-semibold uppercase text-slate-400">Kein Bild</span>}
                 </div>
-                <span className="min-w-0 flex-1">
+          <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-semibold text-slate-900">{option.productName || option.label}</span>
-                  <span className="block truncate text-xs text-slate-500">{[option.asin, option.label].filter(Boolean).join(" · ")}</span>
+                  <span className="block truncate text-xs text-slate-500">
+                    {[
+                      option.asin,
+                      option.label,
+                      typeof option.dailySales30 === "number"
+                        ? `Ø ${option.dailySales30.toFixed(1).replace(".", ",")} / Tag`
+                        : null,
+                      option.active === false ? "inaktiv" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
                 </span>
               </button>
             ))}
@@ -763,6 +750,9 @@ export default function DashboardPage() {
   const [previousYearData, setPreviousYearData] = useState<Point[] | null>(null);
   const [olderYearData, setOlderYearData] = useState<Point[] | null>(null);
   const [currentRecent30Units, setCurrentRecent30Units] = useState(0);
+  const [currentRecentTempoDays, setCurrentRecentTempoDays] = useState(14);
+  const [orderItemsSyncKey, setOrderItemsSyncKey] = useState(0);
+
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -770,6 +760,33 @@ export default function DashboardPage() {
   const [sku, setSku] = useState<string>("");
   const [skuLoadErr, setSkuLoadErr] = useState<string | null>(null);
   const [skuLoading, setSkuLoading] = useState<boolean>(true);
+  const [showInactiveListings, setShowInactiveListings] = useState(false);
+  const [skuMeta, setSkuMeta] = useState<{ activeCount: number; inactiveCount: number } | null>(null);
+  const [showCurrentYearChart, setShowCurrentYearChart] = useState(true);
+  const [showPreviousYearChart, setShowPreviousYearChart] = useState(true);
+  const [showOlderYearChart, setShowOlderYearChart] = useState(false);
+  const [cartonSpec, setCartonSpec] = useState<CartonSpecRow | null>(null);
+  const [reorderDetailsOpen, setReorderDetailsOpen] = useState(false);
+
+  const inventory = useInventoryOverview(showInactiveListings);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem("amz_show_inactive_listings");
+      if (stored === "1") setShowInactiveListings(true);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  function updateShowInactiveListings(next: boolean) {
+    setShowInactiveListings(next);
+    try {
+      window.localStorage.setItem("amz_show_inactive_listings", next ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }
 
   const [currentYearEvents, setCurrentYearEvents] = useState<RawEvent[] | null>(null);
   const [previousYearEvents, setPreviousYearEvents] = useState<RawEvent[] | null>(null);
@@ -777,6 +794,8 @@ export default function DashboardPage() {
 
   // Inventory
   const [inventoryLeft, setInventoryLeft] = useState<number | null>(null);
+  const [inventoryInbound, setInventoryInbound] = useState(0);
+  const [inventoryOnHand, setInventoryOnHand] = useState<number | null>(null);
   const [inventoryErr, setInventoryErr] = useState<string | null>(null);
 
   // Heute als UTC-ISO
@@ -797,10 +816,14 @@ export default function DashboardPage() {
         const r = await fetch("/api/metrics/skus", { cache: "no-store" });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(j?.error || "SKU-Fehler");
-        const list: SkuOption[] = (j.skus as any[]).map((v) =>
-          typeof v === "string" ? { value: v, label: v.trim() } : v
+        const list: SkuOption[] = sortByDailySalesDesc(
+          (j.skus as any[]).map((v) => (typeof v === "string" ? { value: v, label: v.trim() } : v)),
         );
         setSkus(list);
+        setSkuMeta({
+          activeCount: Number(j?.meta?.activeCount ?? list.filter((row) => row.active !== false).length),
+          inactiveCount: Number(j?.meta?.inactiveCount ?? list.filter((row) => row.active === false).length),
+        });
       } catch (e: any) {
         setSkus([]);
         setSkuLoadErr(e?.message ?? "Unbekannter Fehler");
@@ -831,6 +854,9 @@ export default function DashboardPage() {
         if (!olderResponse.ok || !olderJson.ok) throw new Error(olderJson?.error || `Fehler ${olderYear}`);
         setCurrentYearData(currentJson.points as Point[]);
         setCurrentRecent30Units(Math.max(0, Number(currentJson.recent30Units || 0)));
+        setCurrentRecentTempoDays(
+          Math.max(1, Math.round(Number(currentJson.recentTempoDays || 14)) || 14),
+        );
         setPreviousYearData(previousJson.points as Point[]);
         setOlderYearData(olderJson.points as Point[]);
       } catch (e: any) {
@@ -839,7 +865,31 @@ export default function DashboardPage() {
         setLoading(false);
       }
     })();
-  }, [sku, currentYear, previousYear, olderYear]);
+  }, [sku, currentYear, previousYear, olderYear, orderItemsSyncKey]);
+
+  // Bei SKU: Order-Items nachladen (ohne Fee-Lag), danach Chart neu
+  useEffect(() => {
+    if (!sku) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/amazon/order-items/sync?days=18&maxOrders=220", {
+          method: "POST",
+          cache: "no-store",
+        });
+        const json = await response.json();
+        if (cancelled || !response.ok || !json.ok) return;
+        if ((json.upserted || 0) > 0 || (json.fetched || 0) > 0) {
+          setOrderItemsSyncKey((value) => value + 1);
+        }
+      } catch {
+        // Sync ist best-effort; Fee-Fallback bleibt aktiv
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sku]);
 
   // Events je Jahr laden
   useEffect(() => {
@@ -868,23 +918,50 @@ export default function DashboardPage() {
     })();
   }, [currentYear, previousYear, olderYear]);
 
-  // Inventory laden wenn SKU gesetzt
+  // Inventory laden wenn SKU gesetzt (Available + Inbound für OOS/Nachbestellung)
   useEffect(() => {
     (async () => {
       setInventoryLeft(null);
+      setInventoryOnHand(null);
+      setInventoryInbound(0);
       setInventoryErr(null);
+      setCartonSpec(null);
       if (!sku) return;
       try {
-        const r = await fetch(`/api/inventory?sku=${encodeURIComponent(sku)}`, { cache: "no-store" });
-        const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j?.error || "Inventory-Fehler");
-        const v =
+        const [invRes, specRes] = await Promise.all([
+          fetch(`/api/inventory?sku=${encodeURIComponent(sku)}`, { cache: "no-store" }),
+          fetch(`/api/inventory/carton-specs?sku=${encodeURIComponent(sku)}`, { cache: "no-store" }),
+        ]);
+        const j = await invRes.json();
+        if (!invRes.ok || !j.ok) throw new Error(j?.error || "Inventory-Fehler");
+        const onHand =
           typeof j.inventory_left === "number"
             ? j.inventory_left
             : j.inventory_left != null
             ? Number(j.inventory_left)
             : null;
-        setInventoryLeft(Number.isFinite(v) ? (v as number) : 0);
+        const inbound =
+          typeof j.inbound_total === "number"
+            ? Math.max(0, j.inbound_total)
+            : j.inbound_total != null
+            ? Math.max(0, Number(j.inbound_total) || 0)
+            : 0;
+        const effective =
+          typeof j.inventory_effective === "number"
+            ? j.inventory_effective
+            : onHand != null && Number.isFinite(onHand)
+            ? Number(onHand) + inbound
+            : null;
+        setInventoryOnHand(onHand != null && Number.isFinite(onHand) ? Number(onHand) : 0);
+        setInventoryInbound(inbound);
+        setInventoryLeft(effective != null && Number.isFinite(effective) ? Number(effective) : 0);
+
+        if (specRes.ok) {
+          const specJson = await specRes.json();
+          if (specJson.ok && specJson.item) {
+            setCartonSpec(specJson.item as CartonSpecRow);
+          }
+        }
       } catch (e: any) {
         setInventoryErr(e?.message ?? "Unbekannter Fehler");
       }
@@ -892,11 +969,30 @@ export default function DashboardPage() {
   }, [sku]);
 
   const yMax = useMemo(() => {
-    const currentMax = currentYearData ? Math.max(0, ...currentYearData.map((p) => p.total)) : 0;
-    const previousMax = previousYearData ? Math.max(0, ...previousYearData.map((p) => p.total)) : 0;
-    const olderMax = olderYearData ? Math.max(0, ...olderYearData.map((p) => p.total)) : 0;
-    return Math.max(currentMax, previousMax, olderMax);
-  }, [currentYearData, previousYearData, olderYearData]);
+    const totals: number[] = [];
+    if (showCurrentYearChart && currentYearData) {
+      totals.push(...currentYearData.map((point) => point.total));
+    }
+    if (showPreviousYearChart && previousYearData) {
+      totals.push(...previousYearData.map((point) => point.total));
+    }
+    if (showOlderYearChart && olderYearData) {
+      totals.push(...olderYearData.map((point) => point.total));
+    }
+    // Fallback: keep comparison scale ready even while toggles load
+    if (!totals.length) {
+      if (currentYearData) totals.push(...currentYearData.map((point) => point.total));
+      if (previousYearData) totals.push(...previousYearData.map((point) => point.total));
+    }
+    return Math.max(1, ...totals.map((value) => Math.max(0, value)));
+  }, [
+    currentYearData,
+    previousYearData,
+    olderYearData,
+    showCurrentYearChart,
+    showPreviousYearChart,
+    showOlderYearChart,
+  ]);
 
   const currentEventMap = useMemo<EventsForYear | null>(
     () => (currentYearData && currentYearEvents ? buildEventMappings(currentYearData, currentYearEvents, todayISO) : null),
@@ -928,194 +1024,371 @@ export default function DashboardPage() {
   // Header-Zahlenformat
   const nfTop = useMemo(() => new Intl.NumberFormat("de-DE"), []);
 
+  const visibleSkus = useMemo(() => {
+    const list = skus || [];
+    if (showInactiveListings) return list;
+    return list.filter((option) => option.active !== false || option.value === sku);
+  }, [skus, showInactiveListings, sku]);
+
   // 2025 Wochen-Map
   const currentYearMap = useMemo(() => {
     return currentYearData ? new Map<number, number>(currentYearData.map((p) => [p.isoWeek, p.total || 0])) : null;
   }, [currentYearData]);
 
-  // Reorder-Plan (6 Monate) – korrekt mit Jahreswechseln
+  const leadTimeDays = useMemo(() => leadTimeDaysFromSpec(cartonSpec), [cartonSpec]);
+
+  // Reorder: Timing aus Lieferzeit; Menge = Charge über Gesamtdauer + Puffer ab Ankunft (LY)
   const reorderPlanTop = useMemo(() => {
-    if (!sku || inventoryLeft == null) return null;
+    if (!sku || inventoryLeft == null || leadTimeDays == null) return null;
     if (!currentIso || !previousYearMap || !currentYearMap) return null;
 
-    type YearTag = "previous" | "current";
-    const fallbackWeeklyDemand = Math.max(0, currentRecent30Units) / 30 * 7;
-    const growthFactor = positiveGrowthFactor(currentYearMap, previousYearMap, currentIso.week);
-    const demandOf = (tag: YearTag, w: number) => {
-      const seasonalDemand = Math.max(0, (tag === "previous" ? previousYearMap.get(w) : currentYearMap.get(w)) ?? 0);
-      // Nullwochen sind bei jungen Listings und OOS-Phasen keine belastbare SaisonalitÃ¤t.
-      return chooseForecastDemand({
-        seasonalDemand,
-        recentDemand: fallbackWeeklyDemand,
-        growthFactor: tag === "previous" ? growthFactor : 1,
-      }).demand;
-    };
+    return planArrivalShipmentReorder({
+      inventory: inventoryLeft,
+      currentIsoYear: currentIso.year,
+      currentIsoWeek: currentIso.week,
+      previousYearWeekTotals: previousYearMap,
+      currentYearWeekTotals: currentYearMap,
+      recent30Units: currentRecent30Units,
+      recentTempoDays: currentRecentTempoDays,
+      leadTimeDays,
+      bufferDays: Math.max(0, Number(cartonSpec?.bufferTimeDays) || 0),
+    });
+  }, [
+    sku,
+    inventoryLeft,
+    currentIso,
+    previousYearMap,
+    currentYearMap,
+    currentRecent30Units,
+    currentRecentTempoDays,
+    leadTimeDays,
+    cartonSpec?.bufferTimeDays,
+  ]);
 
-    let remaining = inventoryLeft;
-    let w = currentIso.week;
-    let tag: YearTag = "previous";
-    let elapsed = 0;
+  const daysUntilOos = useMemo(() => {
+    if (!sku) return null;
+    const fromOverview = inventory.data?.items.find((item) => item.sku === sku)?.daysOfCover;
+    if (typeof fromOverview === "number") return fromOverview;
+    if (!reorderPlanTop) return null;
+    if (reorderPlanTop.weeksUntilOos < 0) return 400;
+    return Math.max(0, reorderPlanTop.weeksUntilOos * 7);
+  }, [sku, inventory.data, reorderPlanTop]);
 
-    for (let guard = 0; guard < 500 && remaining > 0; guard++) {
-      w += 1;
-      if (w > 53) { w = 1; tag = tag === "previous" ? "current" : "previous"; }
-      remaining -= demandOf(tag, w);
-      elapsed += 1;
-    }
+  const cartonOrder = useMemo(() => {
+    if (!reorderPlanTop) return null;
+    return roundUpToCartons(reorderPlanTop.reorderQty, cartonSpec?.unitsPerCarton ?? null);
+  }, [reorderPlanTop, cartonSpec]);
 
-    const oosIso = addWeeksToISO(currentIso.year, currentIso.week, Math.max(elapsed, 0));
-    const oosWeek = oosIso.week;
-    const oosYear = oosIso.year;
+  const reorderTiming = useMemo(() => {
+    if (leadTimeDays == null) return null;
+    return classifyReorderTiming(daysUntilOos, leadTimeDays);
+  }, [daysUntilOos, leadTimeDays]);
 
-    let need = 0;
-    let tw = w;
-    let ttag: YearTag = tag;
-    for (let i = 0; i < 26; i++) {
-      tw += 1;
-      if (tw > 53) { tw = 1; ttag = ttag === "previous" ? "current" : "previous"; }
-      need += demandOf(ttag, tw);
-    }
+  // Countdown events remain available for charts via event maps
+  // (header text intentionally minimal)
 
-    const newOOS = addWeeksToISO(oosYear, oosWeek, 26);
+  function focusSku(nextSku: string) {
+    setSku(nextSku);
+    document.getElementById("product-filter")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
-    return {
-      oosWeek,
-      oosYear,
-      reorderQty: need,
-      newOOSWeek: newOOS.week,
-      newOOSYear: newOOS.year,
-    };
-  }, [sku, inventoryLeft, currentIso, previousYearMap, currentYearMap, currentRecent30Units]);
-
-  // Countdown (optional)
-  type UpcomingEvent = RawEvent & { days: number };
-  const futureEvents = useMemo<UpcomingEvent[]>(() => {
-    const all: RawEvent[] = [...(previousYearEvents || []), ...(currentYearEvents || [])];
-    const t = new Date(todayISO + "T00:00:00Z").getTime();
-    return all
-      .map((e) => ({ ...e, days: Math.ceil((new Date(e.event_date + "T00:00:00Z").getTime() - t) / 86400000) }))
-      .filter((e) => e.days > 0)
-      .sort((a, b) => a.days - b.days)
-      .slice(0, 2);
-  }, [previousYearEvents, currentYearEvents, todayISO]);
-
-  const emojiFor = (name: string) => {
-    const n = name.toLowerCase();
-    if (n.includes("prime")) return "📦";
-    if (n.includes("black friday")) return "❄️";
-    return "⏳";
-  };
-  const colorFor = (days: number) =>
-    days <= 7 ? "text-red-600" : days <= 30 ? "text-yellow-600" : "text-green-600";
+  const chartToggleClass = (active: boolean) =>
+    `rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+      active
+        ? "border-slate-900 bg-slate-900 text-white"
+        : "border-slate-300 bg-white text-slate-600 hover:border-slate-400"
+    }`;
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8" style={{ fontFamily: "system-ui, sans-serif" }}>
-      {/* PAGE-HEADER */}
-      <div className="mb-4 md:flex md:items-start md:justify-between md:gap-6">
-        <div className="flex-1">
-          <h1 className="text-2xl font-semibold">Dashboard · Jahresvergleich</h1>
-          <p className="text-sm text-gray-600">
-            Quelle: <code>vw_amazon_fees_orders</code> · Metrik: <b>quantity</b> · Datum: <b>purchase_date_berlin</b>
-          </p>
-          {futureEvents.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-6 text-sm">
-              {futureEvents.map((e, i) => (
-                <span key={i} className={colorFor(e.days)}>
-                  {emojiFor(e.event_name)} Noch {e.days} Tage bis {e.event_name}
-                </span>
-              ))}
-            </div>
-          )}
+    <div className="mx-auto max-w-6xl px-4 py-5 md:py-6">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h1 className="shrink-0 text-lg font-semibold tracking-tight text-slate-950 md:text-xl">Dashboard</h1>
+          <SyncStatusBanner />
         </div>
 
-        {/* RECHTS: Bestell-/OOS-Block */}
-        {reorderPlanTop && sku && (
-          <div className="mt-3 md:mt-0 text-right shrink-0 min-w-[300px]">
-            <div className="text-[11px] uppercase tracking-wide text-gray-500">Bestellplanung</div>
-            <div className="mt-1 text-sm text-gray-800 space-y-1">
-              <div>
-                <span className="font-semibold">Termin voraussichtlich OOS:</span>{" "}
-                KW {reorderPlanTop.oosWeek} {reorderPlanTop.oosYear}
-              </div>
-              <div>
-                <span className="font-semibold">Wie viele bestellen (6 Monate):</span>{" "}
-                {nfTop.format(reorderPlanTop.reorderQty)} Stk
-              </div>
-              <div>
-                <span className="font-semibold">OOS mit neuer Lieferung:</span>{" "}
-                KW {reorderPlanTop.newOOSWeek} {reorderPlanTop.newOOSYear}
-              </div>
+        <section
+          id="product-filter"
+          className="mb-4 scroll-mt-4 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm md:p-4"
+        >
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+              <SkuProductSelect
+                options={visibleSkus}
+                value={sku}
+                onChange={setSku}
+                disabled={skuLoading || !skus}
+              />
+              {!!sku && (
+                <button className="text-xs font-medium text-slate-600 underline" onClick={() => setSku("")}>
+                  Alle
+                </button>
+              )}
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* SKU-Filter */}
-      <div className="mb-4 flex flex-col gap-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <label className="text-sm font-medium text-gray-700">Produkt:</label>
-          <SkuProductSelect
-            options={skus || []}
-            value={sku}
-            onChange={setSku}
-            disabled={skuLoading || !skus}
-          />
-          {!!sku && (
-            <button className="text-xs text-blue-600 underline" onClick={() => setSku("")}>
-              Zurücksetzen
-            </button>
-          )}
-        </div>
-        {!skuLoading && skus && skus.length === 0 && (
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-gray-700">SKU manuell:</label>
-            <input
-              className="border rounded px-2 py-1 text-sm w-64"
-              placeholder="SKU exakt eintippen…"
-              value={sku}
-              onChange={(e) => setSku(e.target.value)}
-              spellCheck={false}
+            <ShowInactiveListingsToggle
+              checked={showInactiveListings}
+              onChange={updateShowInactiveListings}
+              activeCount={skuMeta?.activeCount}
+              inactiveCount={skuMeta?.inactiveCount}
             />
-            <small className="text-gray-500">Tipp: Groß/Kleinschreibung &amp; Leerzeichen exakt wie in der DB.</small>
           </div>
-        )}
-      </div>
 
-      {loading && <div>lädt…</div>}
-      {err && <div style={{ color: "crimson" }}>Fehler: {err}</div>}
+          {sku && leadTimeDays == null && (
+            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
+              Für die Nachbestellung fehlen Produktions- und Lieferdauer.{" "}
+              <Link href="/sku-stammdaten" className="font-semibold underline">
+                In SKU-Stammdaten hinterlegen
+              </Link>
+            </div>
+          )}
 
-      {currentYearData && previousYearData && olderYearData && (
-        <>
-          <YearChart
-            data={currentYearData}
-            year={currentYear}
-            yMax={yMax}
-            sku={sku}
-            events={currentEventMap}
-            prevYearWeekTotals={previousYearMap}
-            currentIso={currentIso}
-            inventoryLeft={inventoryLeft}
-            recent30Units={currentRecent30Units}
-          />
-          <YearChart
-            data={previousYearData}
-            year={previousYear}
-            yMax={yMax}
-            sku={sku}
-            events={previousEventMap}
-            currentIso={currentIso}
-          />
-          <YearChart
-            data={olderYearData}
-            year={olderYear}
-            yMax={yMax}
-            sku={sku}
-            events={olderEventMap}
-            currentIso={currentIso}
-          />
-        </>
-      )}
-      <InventoryOverviewTable />
+          {sku && leadTimeDays != null && reorderTiming && (
+            <div
+              className={`mt-3 rounded-xl border px-4 py-3 shadow-sm ${
+                reorderTiming.status === "too_late" || reorderTiming.status === "already_oos"
+                  ? "border-red-300 bg-red-50"
+                  : reorderTiming.status === "order_now"
+                    ? "border-amber-300 bg-amber-50"
+                    : "border-slate-200 bg-white"
+              }`}
+            >
+              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                Wann bestellen?{" "}
+                <span className="font-normal normal-case tracking-normal text-slate-400">
+                  (Lieferzeit {leadTimeDays} Tage
+                  {cartonSpec
+                    ? `: ${cartonSpec.productionTimeDays || 0} Prod. + ${cartonSpec.shippingTimeDays || 0} Versand`
+                    : ""}
+                  )
+                </span>
+              </div>
+
+              {reorderTiming.status === "no_demand" && (
+                <div className="mt-1 text-lg font-semibold text-slate-950">Kein Verkaufstempo – OOS nicht berechenbar</div>
+              )}
+
+              {reorderTiming.status === "already_oos" && (
+                <div className="mt-1">
+                  <div className="text-lg font-semibold text-red-800">Bereits OOS</div>
+                </div>
+              )}
+
+              {reorderTiming.status === "order_now" && (
+                <div className="mt-1">
+                  <div className="text-lg font-semibold text-amber-950">Jetzt bestellen</div>
+                  <p className="mt-1 text-sm leading-relaxed text-amber-950/80">
+                    OOS in ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tagen – genau die Lieferzeit.
+                    Heute ist der letzte sinnvolle Bestelltag.
+                  </p>
+                </div>
+              )}
+
+              {reorderTiming.status === "ok" && (
+                <div className="mt-1">
+                  <div className="text-lg font-semibold text-slate-950">
+                    Spätestens in {nfTop.format(reorderTiming.daysUntilMustOrder!)} Tagen bestellen
+                  </div>
+                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
+                    OOS voraussichtlich in {nfTop.format(reorderTiming.daysUntilOos!)} Tagen
+                    {reorderPlanTop?.oosWeek != null
+                      ? ` (KW ${reorderPlanTop.oosWeek}/${reorderPlanTop.oosYear})`
+                      : ""}
+                    . Bestellfrist = OOS minus Lieferzeit.
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-3 grid gap-2 border-t border-slate-200/80 pt-3 text-sm sm:grid-cols-3">
+                <div className="rounded-lg bg-white/70 px-3 py-2 ring-1 ring-slate-200/80">
+                  <div className="text-[11px] font-medium text-slate-500">Aktueller Stand</div>
+                  <div className="mt-0.5 font-semibold text-slate-900">
+                    {reorderTiming.daysUntilOos === null
+                      ? "Kein Tempo"
+                      : reorderTiming.daysUntilOos === 0
+                        ? "Jetzt leer"
+                        : `Noch ca. ${nfTop.format(reorderTiming.daysUntilOos)} Tage`}
+                  </div>
+                  <div className="mt-0.5 text-xs text-slate-600">
+                    {inventoryLeft != null ? `${nfTop.format(Math.round(inventoryLeft))} Stück` : "–"}
+                    {inventoryInbound > 0 ? ` inkl. +${nfTop.format(inventoryInbound)} Inbound` : ""}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white/70 px-3 py-2 ring-1 ring-slate-200/80">
+                  <div className="text-[11px] font-medium text-slate-500">Lieferverzug</div>
+                  <div
+                    className={`mt-0.5 font-semibold tabular-nums ${
+                      reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
+                        ? "text-red-800"
+                        : "text-slate-900"
+                    }`}
+                  >
+                    {reorderTiming.daysUntilMustOrder == null
+                      ? "–"
+                      : reorderTiming.daysUntilMustOrder < 0
+                        ? `−${nfTop.format(Math.abs(reorderTiming.daysUntilMustOrder))} Tage`
+                        : reorderTiming.daysUntilMustOrder === 0
+                          ? "0 Tage"
+                          : "kein Verzug"}
+                  </div>
+                  {reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder > 0 && (
+                    <div className="mt-0.5 text-xs text-slate-600">
+                      noch {nfTop.format(reorderTiming.daysUntilMustOrder)} Tage bis Bestellfrist
+                    </div>
+                  )}
+                  {reorderTiming.daysUntilMustOrder === 0 && (
+                    <div className="mt-0.5 text-xs text-slate-600">Bestellfrist ist heute</div>
+                  )}
+                </div>
+                <div className="rounded-lg bg-white/70 px-3 py-2 ring-1 ring-slate-200/80">
+                  <div className="text-[11px] font-medium text-slate-500">Nachbestellung</div>
+                  <div className="mt-0.5 font-semibold tabular-nums text-slate-900">
+                    {cartonOrder && cartonOrder.orderQty > 0
+                      ? `${nfTop.format(cartonOrder.orderQty)} Stück`
+                      : "nicht nötig"}
+                  </div>
+                  {reorderPlanTop && cartonOrder && cartonOrder.orderQty > 0 && (
+                    <div className="mt-0.5 text-xs text-slate-600">
+                      Nächste Charge reicht für {nfTop.format(reorderPlanTop.coverDays)} Tage aus
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {reorderTiming.status === "too_late" && (
+                <p className="mt-3 text-sm leading-relaxed text-red-900/80">
+                  Bestand reicht noch ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tage. Bestellst du heute,
+                  fehlt die Ware {nfTop.format(Math.abs(reorderTiming.daysUntilMustOrder!))} Tage vor Ankunft –
+                  in dem Zeitraum kein Verkauf (laut Prognose).
+                </p>
+              )}
+
+              {reorderTiming.status === "already_oos" && (
+                <p className="mt-3 text-sm leading-relaxed text-red-900/80">
+                  Bestand ist leer. Bestellst du heute, kommt Ware erst in {leadTimeDays} Tagen an – so lange
+                  kein Verkauf.
+                </p>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setReorderDetailsOpen((open) => !open)}
+                className="mt-2 text-xs font-medium text-slate-500 underline"
+              >
+                {reorderDetailsOpen ? "Erklärung ausblenden" : "Rechnung & Nachbestellmenge"}
+              </button>
+
+              {reorderDetailsOpen && (
+                <div className="mt-2 space-y-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs leading-relaxed text-slate-700">
+                  <p>
+                    <strong>Bestellfrist:</strong> Tage bis OOS − Lieferzeit ={" "}
+                    {reorderTiming.daysUntilOos == null
+                      ? "–"
+                      : `${reorderTiming.daysUntilOos} − ${leadTimeDays} = ${reorderTiming.daysUntilMustOrder}`}
+                    . Negativ = Lieferverzug (OOS-Tage vor Ankunft).
+                  </p>
+                  <p>
+                    <strong>Nachbestellmenge:</strong> Vorjahresbedarf (ggf. mit Wachstum, sonst aktuelles
+                    Verkaufstempo ab erstem Verkaufstag)
+                    über{" "}
+                    {reorderPlanTop
+                      ? `${reorderPlanTop.coverDays} Tage = ${reorderPlanTop.leadTimeDays} Lieferzeit` +
+                        (reorderPlanTop.bufferDays > 0
+                          ? ` + ${reorderPlanTop.bufferDays} Puffer`
+                          : "")
+                      : "Charge-Zeitraum"}
+                    , beginnend ab erwarteter Ankunft – nicht abzüglich aktuellem Bestand.
+                    {reorderPlanTop
+                      ? ` Prognose ${nfTop.format(Math.round(reorderPlanTop.shipmentDemand))} Stück`
+                      : ""}
+                    {cartonOrder?.rounded
+                      ? `, auf volle Kartons = ${nfTop.format(cartonOrder.orderQty)} Stück`
+                      : cartonOrder && cartonOrder.orderQty > 0
+                        ? ` = ${nfTop.format(cartonOrder.orderQty)} Stück`
+                        : ""}
+                    .
+                  </p>
+                  <Link href="/sku-stammdaten" className="inline-block text-slate-600 underline">
+                    Stammdaten / Pufferzeit anpassen
+                  </Link>
+                </div>
+              )}
+            </div>
+          )}
+          {skuLoadErr && <div className="mt-2 text-sm text-red-600">{skuLoadErr}</div>}
+          {inventoryErr && <div className="mt-2 text-sm text-red-600">{inventoryErr}</div>}
+        </section>
+
+        <section className="mb-4 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm md:p-4">
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-base font-semibold text-slate-950">Jahresvergleich</h2>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className={chartToggleClass(showCurrentYearChart)} onClick={() => setShowCurrentYearChart((v) => !v)}>
+                {currentYear}
+              </button>
+              <button type="button" className={chartToggleClass(showPreviousYearChart)} onClick={() => setShowPreviousYearChart((v) => !v)}>
+                {previousYear}
+              </button>
+              <button type="button" className={chartToggleClass(showOlderYearChart)} onClick={() => setShowOlderYearChart((v) => !v)}>
+                {olderYear}
+              </button>
+            </div>
+          </div>
+
+          {loading && <div className="py-8 text-center text-sm text-slate-500">Lädt …</div>}
+          {err && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+          {!loading && !err && currentYearData && previousYearData && olderYearData && (
+            <div className="space-y-1">
+              {!showCurrentYearChart && !showPreviousYearChart && !showOlderYearChart && (
+                <div className="py-6 text-center text-sm text-slate-500">Mindestens ein Jahr wählen.</div>
+              )}
+              {showCurrentYearChart && (
+                <YearChart
+                  data={currentYearData}
+                  year={currentYear}
+                  yMax={yMax}
+                  sku={sku}
+                  events={currentEventMap}
+                  prevYearWeekTotals={previousYearMap}
+                  currentIso={currentIso}
+                  inventoryLeft={inventoryLeft}
+                  inventoryOnHand={inventoryOnHand}
+                  inventoryInbound={inventoryInbound}
+                  recent30Units={currentRecent30Units}
+                  recentTempoDays={currentRecentTempoDays}
+                />
+              )}
+              {showPreviousYearChart && (
+                <YearChart
+                  data={previousYearData}
+                  year={previousYear}
+                  yMax={yMax}
+                  sku={sku}
+                  events={previousEventMap}
+                  currentIso={currentIso}
+                />
+              )}
+              {showOlderYearChart && (
+                <YearChart
+                  data={olderYearData}
+                  year={olderYear}
+                  yMax={yMax}
+                  sku={sku}
+                  events={olderEventMap}
+                  currentIso={currentIso}
+                />
+              )}
+            </div>
+          )}
+        </section>
+
+        <InventoryTableSection
+          data={inventory.data}
+          loading={inventory.loading}
+          error={inventory.error}
+          onReload={inventory.reload}
+          selectedSku={sku}
+          onSelectSku={focusSku}
+        />
     </div>
   );
 }
