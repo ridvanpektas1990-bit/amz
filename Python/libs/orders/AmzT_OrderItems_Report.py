@@ -28,6 +28,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from sp_api.api import Reports
+from sp_api.auth.exceptions import AuthorizationError
 from sp_api.base import (
     Marketplaces,
     SellingApiBadRequestException,
@@ -310,6 +311,11 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except AuthorizationError as exc:
+        # Stale/revoked connections in amazon_connections should not fail the whole matrix.
+        print(f"::warning::Skipping tenant={TENANT_ID}: LWA authorization failed ({exc})")
+        print(json.dumps({"ok": False, "skipped": True, "tenant_id": TENANT_ID, "reason": "unauthorized_client"}))
+        raise SystemExit(0)
     except SellingApiForbiddenException:
         print("403 Forbidden → Reports / Inventory and Order Tracking Rolle prüfen.")
         raise

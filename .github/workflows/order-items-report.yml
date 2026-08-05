@@ -37,7 +37,9 @@ jobs:
     steps:
       - id: mk
         env:
+          # Manual input wins; schedule uses ACTIVE_TENANTS when set, else ALL.
           IN_TENANTS: ${{ github.event.inputs.tenants || vars.ACTIVE_TENANTS || 'ALL' }}
+          ACTIVE_TENANTS: ${{ vars.ACTIVE_TENANTS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
@@ -45,7 +47,13 @@ jobs:
           import json, os, urllib.request
           sb = (os.getenv("SUPABASE_URL") or "").rstrip("/")
           key = os.getenv("SUPABASE_KEY") or ""
-          filt = [x.strip() for x in (os.getenv("IN_TENANTS") or "ALL").split(",") if x.strip()]
+          raw = (os.getenv("IN_TENANTS") or "ALL").strip()
+          active = [x.strip() for x in (os.getenv("ACTIVE_TENANTS") or "").split(",") if x.strip()]
+          # Prefer ACTIVE_TENANTS over dumping every amazon_connections row.
+          if raw == "ALL" and active:
+              filt = active
+          else:
+              filt = [x.strip() for x in raw.split(",") if x.strip()] or ["ALL"]
           req = urllib.request.Request(
               f"{sb}/rest/v1/amazon_connections?select=tenant_id,region",
               headers={"apikey": key, "Authorization": f"Bearer {key}"},
