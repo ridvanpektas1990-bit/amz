@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 import { loadCatalogMetadata, type CatalogMetadata } from "@/lib/amazon-catalog";
+import { calculatePositiveGrowthFactor, chooseForecastDemand } from "@/lib/inventory-forecast";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -203,11 +204,10 @@ export async function GET(req: NextRequest) {
         const available = Math.max(0, number(row.inventory_left));
         const dailySales30 = sales.units30 / 30;
         // Stabilisiert kleine Vorjahresbasen, ohne Wachstum großer Listings nennenswert zu verwässern.
-        const growthPriorUnits = 100;
-        const stabilizedGrowthFactor = sales.previousComparable > 0 && sales.currentComparable > sales.previousComparable
-          ? (sales.currentComparable + growthPriorUnits) / (sales.previousComparable + growthPriorUnits)
-          : 1;
-        const growthFactor = stabilizedGrowthFactor > 1 ? stabilizedGrowthFactor : 1;
+        const growthFactor = calculatePositiveGrowthFactor(
+          sales.currentComparable,
+          sales.previousComparable,
+        );
         const growthPercent = Math.round((growthFactor - 1) * 1000) / 10;
 
         const forecastDemandForDate = (forecastDate: Date) => {
@@ -218,11 +218,16 @@ export async function GET(req: NextRequest) {
           const seasonalUnits = sales.byMonth.get(sourceKey) || 0;
           const canUseSeason = isCompleteMonth(sourceYear, sourceMonth, today);
           const seasonalRate = canUseSeason && seasonalUnits > 0
-            ? (seasonalUnits / daysInMonth(sourceYear, sourceMonth)) * growthFactor
+            ? seasonalUnits / daysInMonth(sourceYear, sourceMonth)
             : 0;
+          const forecast = chooseForecastDemand({
+            seasonalDemand: seasonalRate,
+            recentDemand: dailySales30,
+            growthFactor,
+          });
           return {
-            demand: seasonalRate > 0 ? seasonalRate : dailySales30,
-            seasonal: seasonalRate > 0,
+            demand: forecast.demand,
+            seasonal: forecast.source === "seasonal",
           };
         };
 

@@ -15,6 +15,7 @@ import {
   Customized, // <— wichtig für den Hover-Hotspot
 } from "recharts";
 import InventoryOverviewTable from "@/components/InventoryOverviewTable";
+import { calculatePositiveGrowthFactor, chooseForecastDemand } from "@/lib/inventory-forecast";
 
 /* ===== Types ===== */
 type Point = {
@@ -195,9 +196,7 @@ function positiveGrowthFactor(
     currentUnits += Math.max(0, current.get(week) || 0);
     previousUnits += Math.max(0, previous.get(week) || 0);
   }
-  if (previousUnits <= 0 || currentUnits <= previousUnits) return 1;
-  const stabilizationUnits = 100;
-  return (currentUnits + stabilizationUnits) / (previousUnits + stabilizationUnits);
+  return calculatePositiveGrowthFactor(currentUnits, previousUnits);
 }
 
 /* ===== Einzeljahres-Chart ===== */
@@ -324,7 +323,11 @@ function YearChart({
       ? positiveGrowthFactor(currentYearWeekTotals, prevYearWeekTotals, currentIso.week)
       : 1;
     const demandWithFallback = (seasonal: number, applyGrowth: boolean) =>
-      seasonal > 0 ? seasonal * (applyGrowth ? growthFactor : 1) : fallbackWeeklyDemand;
+      chooseForecastDemand({
+        seasonalDemand: seasonal,
+        recentDemand: fallbackWeeklyDemand,
+        growthFactor: applyGrowth ? growthFactor : 1,
+      }).demand;
 
     if (prevYearWeekTotals) {
       for (let w = currentIso.week + 1; w <= 53; w++) {
@@ -941,9 +944,11 @@ export default function DashboardPage() {
     const demandOf = (tag: YearTag, w: number) => {
       const seasonalDemand = Math.max(0, (tag === "previous" ? previousYearMap.get(w) : currentYearMap.get(w)) ?? 0);
       // Nullwochen sind bei jungen Listings und OOS-Phasen keine belastbare SaisonalitÃ¤t.
-      return seasonalDemand > 0
-        ? seasonalDemand * (tag === "previous" ? growthFactor : 1)
-        : fallbackWeeklyDemand;
+      return chooseForecastDemand({
+        seasonalDemand,
+        recentDemand: fallbackWeeklyDemand,
+        growthFactor: tag === "previous" ? growthFactor : 1,
+      }).demand;
     };
 
     let remaining = inventoryLeft;
