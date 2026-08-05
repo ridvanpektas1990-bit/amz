@@ -140,6 +140,28 @@ def first_present(columns: set[str], *names: str) -> str | None:
     return next((name for name in names if name in columns), None)
 
 
+def snapshot_exists(columns: set[str], snapshot_date: str) -> bool:
+    tenant_column = first_present(columns, "tenant_id", "tenant")
+    marketplace_column = first_present(columns, "marketplace", "marketplace_code")
+    date_column = first_present(columns, "snapshot_date", "inventory_date", "report_date", "date", "day")
+    if not tenant_column or not marketplace_column or not date_column:
+        raise SystemExit(
+            "Cannot enforce daily snapshot idempotency. The inventory table needs tenant, "
+            "marketplace and snapshot-date columns."
+        )
+
+    filters = urllib.parse.urlencode(
+        {
+            tenant_column: f"eq.{TENANT_ID}",
+            marketplace_column: f"eq.{MARKETPLACE_CODE}",
+            date_column: f"eq.{snapshot_date}",
+            "select": date_column,
+            "limit": "1",
+        }
+    )
+    return bool(rest_get(f"{TABLE}?{filters}"))
+
+
 def build_rows(
     summaries: list[dict[str, Any]], columns: set[str], seller_id: str, marketplace_id: str
 ) -> list[dict[str, Any]]:
@@ -230,6 +252,13 @@ def main() -> None:
     }
     columns = table_columns()
     print(f"# Discovered {TABLE} columns: {', '.join(sorted(columns))}")
+    snapshot_date = datetime.now(LOCAL_TZ).date().isoformat()
+    if snapshot_exists(columns, snapshot_date):
+        print(
+            f"# Snapshot already exists for tenant={TENANT_ID}, "
+            f"marketplace={MARKETPLACE_CODE}, date={snapshot_date}; nothing to do"
+        )
+        return
     summaries = fetch_inventory(credentials, mp)
     rows = build_rows(summaries, columns, str(connection.get("seller_id") or ""), mp.marketplace_id)
     insert_rows(rows)

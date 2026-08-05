@@ -1,6 +1,9 @@
-name: Inventory snapshot (manual)
+name: Inventory snapshot
 
 on:
+  schedule:
+    # 07:15 Europe/Berlin in summer, 06:15 in winter.
+    - cron: "15 5 * * *"
   workflow_dispatch:
     inputs:
       tenant:
@@ -14,6 +17,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: inventory-snapshot-${{ inputs.tenant || vars.ACTIVE_TENANTS }}-${{ inputs.marketplace || 'DE' }}
+  cancel-in-progress: false
 
 jobs:
   inventory:
@@ -36,7 +43,7 @@ jobs:
           LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
           LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
           TENANT_ID: ${{ inputs.tenant || vars.ACTIVE_TENANTS }}
-          MARKETPLACE: ${{ inputs.marketplace }}
+          MARKETPLACE: ${{ inputs.marketplace || 'DE' }}
           LOCAL_TZ: ${{ vars.LOCAL_TZ || 'Europe/Berlin' }}
           SUPABASE_BATCH_SIZE: ${{ vars.SUPABASE_BATCH_SIZE || '300' }}
         run: python Python/libs/inventory/AmzT_Inventory.py
