@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -27,7 +27,13 @@ type Point = {
   total: number;
 };
 
-type SkuOption = { value: string; label: string };
+type SkuOption = {
+  value: string;
+  label: string;
+  asin?: string | null;
+  imageUrl?: string | null;
+  productName?: string | null;
+};
 
 type RawEvent = { event_name: string; event_date: string }; // YYYY-MM-DD
 
@@ -594,6 +600,133 @@ function YearChart({
   );
 }
 
+function SkuProductSelect({
+  options,
+  value,
+  onChange,
+  disabled,
+}: {
+  options: SkuOption[];
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.value === value) || null;
+  const filtered = useMemo(() => {
+    const term = query.trim().toLowerCase();
+    if (!term) return options;
+    return options.filter((option) =>
+      [option.productName, option.asin, option.label]
+        .filter(Boolean)
+        .some((entry) => String(entry).toLowerCase().includes(term))
+    );
+  }, [options, query]);
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+
+  function choose(nextValue: string) {
+    onChange(nextValue);
+    setQuery("");
+    setOpen(false);
+  }
+
+  return (
+    <div ref={rootRef} className="relative w-full max-w-xl">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className="flex min-h-14 w-full items-center gap-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left shadow-sm transition hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+      >
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
+          {selected?.imageUrl ? (
+            <img src={selected.imageUrl} alt="" className="h-full w-full object-contain p-0.5" referrerPolicy="no-referrer" />
+          ) : (
+            <span className="text-[9px] font-semibold uppercase text-slate-400">Alle</span>
+          )}
+        </div>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-semibold text-slate-900">
+            {selected?.productName || selected?.label || (disabled ? "Produkte werden geladen …" : "Alle Produkte")}
+          </span>
+          <span className="block truncate text-xs text-slate-500">
+            {selected ? [selected.asin, selected.label].filter(Boolean).join(" · ") : "Gesamten Verkauf anzeigen"}
+          </span>
+        </span>
+        <svg viewBox="0 0 20 20" aria-hidden="true" className={`h-4 w-4 shrink-0 text-slate-500 transition ${open ? "rotate-180" : ""}`}>
+          <path d="m5 7.5 5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && !disabled && (
+        <div className="absolute z-50 mt-2 w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="border-b border-slate-200 p-2">
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}
+              placeholder="Produkt, ASIN oder SKU suchen …"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            />
+          </div>
+          <div role="listbox" className="max-h-96 overflow-y-auto p-1">
+            <button
+              type="button"
+              role="option"
+              aria-selected={!value}
+              onClick={() => choose("")}
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${!value ? "bg-blue-50" : ""}`}
+            >
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-[9px] font-semibold uppercase text-slate-400">Alle</div>
+              <div><div className="text-sm font-semibold">Alle Produkte</div><div className="text-xs text-slate-500">Gesamten Verkauf anzeigen</div></div>
+            </button>
+            {filtered.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="option"
+                aria-selected={option.value === value}
+                onClick={() => choose(option.value)}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${option.value === value ? "bg-blue-50" : ""}`}
+              >
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
+                  {option.imageUrl ? (
+                    <img
+                      src={option.imageUrl}
+                      alt=""
+                      loading="lazy"
+                      referrerPolicy="no-referrer"
+                      className="h-full w-full object-contain p-0.5"
+                      onError={(event) => { event.currentTarget.style.display = "none"; }}
+                    />
+                  ) : <span className="text-[9px] font-semibold uppercase text-slate-400">Kein Bild</span>}
+                </div>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold text-slate-900">{option.productName || option.label}</span>
+                  <span className="block truncate text-xs text-slate-500">{[option.asin, option.label].filter(Boolean).join(" · ")}</span>
+                </span>
+              </button>
+            ))}
+            {filtered.length === 0 && <div className="px-3 py-8 text-center text-sm text-slate-500">Kein Produkt gefunden.</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ===== Page ===== */
 export default function DashboardPage() {
   const currentYear = new Date().getUTCFullYear();
@@ -617,6 +750,10 @@ export default function DashboardPage() {
   // Inventory
   const [inventoryLeft, setInventoryLeft] = useState<number | null>(null);
   const [inventoryErr, setInventoryErr] = useState<string | null>(null);
+  const selectedProduct = useMemo(
+    () => skus?.find((option) => option.value === sku) || null,
+    [skus, sku],
+  );
 
   // Heute als UTC-ISO
   const todayISO = useMemo(() => {
@@ -839,6 +976,18 @@ export default function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8" style={{ fontFamily: "system-ui, sans-serif" }}>
+      {selectedProduct?.imageUrl && (
+        <div className="mb-4 flex justify-center">
+          <div className="flex h-32 w-32 items-center justify-center overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
+            <img
+              src={selectedProduct.imageUrl}
+              alt={selectedProduct.productName || `Amazon-Produkt ${selectedProduct.asin || selectedProduct.label}`}
+              className="h-full w-full object-contain"
+              referrerPolicy="no-referrer"
+            />
+          </div>
+        </div>
+      )}
       {/* PAGE-HEADER */}
       <div className="mb-4 md:flex md:items-start md:justify-between md:gap-6">
         <div className="flex-1">
@@ -881,19 +1030,14 @@ export default function DashboardPage() {
 
       {/* SKU-Filter */}
       <div className="mb-4 flex flex-col gap-2">
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-gray-700">SKU:</label>
-          <select
-            className="border rounded px-2 py-1 text-sm"
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label className="text-sm font-medium text-gray-700">Produkt:</label>
+          <SkuProductSelect
+            options={skus || []}
             value={sku}
-            onChange={(e) => setSku(e.target.value)}
+            onChange={setSku}
             disabled={skuLoading || !skus}
-          >
-            <option value="">Alle SKUs</option>
-            {skus?.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
+          />
           {!!sku && (
             <button className="text-xs text-blue-600 underline" onClick={() => setSku("")}>
               Zurücksetzen
