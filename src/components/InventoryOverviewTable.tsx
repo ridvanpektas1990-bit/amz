@@ -17,6 +17,12 @@ type InventoryItem = {
   units30: number;
   units90: number;
   dailySales30: number;
+  forecastDailySales: number;
+  forecastMethod: "seasonal" | "hybrid" | "recent" | "none";
+  growthFactor: number;
+  growthPercent: number;
+  comparisonCurrentUnits: number;
+  comparisonPreviousUnits: number;
   daysOfCover: number | null;
   estimatedOosDate: string | null;
   status: StockStatus;
@@ -41,6 +47,13 @@ const statusMeta: Record<StockStatus, { label: string; badge: string; dot: strin
   no_sales: { label: "Kein Tempo", badge: "bg-slate-50 text-slate-600 ring-slate-200", dot: "bg-slate-400" },
 };
 
+const forecastLabels = {
+  seasonal: "Saisonal",
+  hybrid: "Saisonal + 30T-Backup",
+  recent: "30T-Backup",
+  none: "Keine Prognose",
+} as const;
+
 function formatDate(value: string | null): string {
   if (!value) return "–";
   const date = new Date(`${value}T12:00:00Z`);
@@ -50,11 +63,13 @@ function formatDate(value: string | null): string {
 function downloadCsv(items: InventoryItem[]) {
   const header = [
     "ASIN", "SKU", "Status", "Verfügbar", "Gesamt", "Reserviert", "Inbound",
-    "Verkäufe 30T", "Verkäufe 90T", "Ø pro Tag", "Reichweite Tage", "OOS-Datum",
+    "Verkäufe 30T", "Verkäufe 90T", "Ø 30T pro Tag", "Prognose pro Tag",
+    "Prognosemethode", "Wachstumsaufschlag %", "Reichweite Tage", "OOS-Datum",
   ];
   const lines = items.map((item) => [
     item.asin, item.sku, statusMeta[item.status].label, item.available, item.total, item.reserved,
-    item.inbound, item.units30, item.units90, item.dailySales30,
+    item.inbound, item.units30, item.units90, item.dailySales30, item.forecastDailySales,
+    forecastLabels[item.forecastMethod], item.growthPercent,
     item.daysOfCover ?? "", item.estimatedOosDate ?? "",
   ]);
   const csv = [header, ...lines]
@@ -147,7 +162,7 @@ export default function InventoryOverviewTable() {
             <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-300">Bestandssteuerung</div>
             <h2 className="mt-1 text-xl font-semibold">ASIN-Reichweite &amp; Out-of-Stock-Prognose</h2>
             <p className="mt-1 max-w-2xl text-sm text-slate-300">
-              Reichweite auf Basis des verfügbaren FBA-Bestands und des durchschnittlichen Absatzes der letzten 30 Tage.
+              Saisonale Reichweite auf Basis der entsprechenden Vorjahresmonate, angepasst um positives Wachstum dieses Jahres.
             </p>
           </div>
           <div className="text-sm text-slate-300">
@@ -238,7 +253,7 @@ export default function InventoryOverviewTable() {
                   <th className="px-4 py-3 text-right font-semibold">Verfügbar</th>
                   <th className="px-4 py-3 text-right font-semibold">Gesamt / reserviert</th>
                   <th className="px-4 py-3 text-right font-semibold">Inbound</th>
-                  <th className="px-4 py-3 text-right font-semibold">Absatz 30T</th>
+                  <th className="px-4 py-3 text-right font-semibold">Absatz &amp; Prognose</th>
                   <th className="px-4 py-3 font-semibold">Reichweite</th>
                   <th className="px-5 py-3 text-right font-semibold">Aktion</th>
                 </tr>
@@ -279,8 +294,15 @@ export default function InventoryOverviewTable() {
                         {item.pendingCustomerOrders > 0 && <div className="text-xs text-slate-500">{nf.format(item.pendingCustomerOrders)} Kundenorders</div>}
                       </td>
                       <td className="px-4 py-4 text-right tabular-nums">
-                        <div className="font-medium text-slate-800">{nf.format(item.units30)} Stk</div>
-                        <div className="text-xs text-slate-500">Ø {decimal.format(item.dailySales30)} / Tag</div>
+                        <div className="font-medium text-slate-800">{nf.format(item.units30)} Stk / 30T</div>
+                        <div className="text-xs text-slate-500">Prognose Ø {decimal.format(item.forecastDailySales)} / Tag</div>
+                        <div
+                          className="mt-1 text-[11px] font-medium text-indigo-700"
+                          title={`Vergleich abgeschlossene Monate: ${nf.format(item.comparisonCurrentUnits)} vs. ${nf.format(item.comparisonPreviousUnits)} Stück; stabilisiert gegen kleine Vorjahresmengen`}
+                        >
+                          {forecastLabels[item.forecastMethod]}
+                          {item.growthPercent > 0 ? ` · +${decimal.format(item.growthPercent)} %` : ""}
+                        </div>
                       </td>
                       <td className="min-w-[210px] px-4 py-4">
                         <div className="flex items-baseline justify-between gap-3">
@@ -314,7 +336,7 @@ export default function InventoryOverviewTable() {
 
           <div className="flex flex-col gap-2 bg-slate-50 px-5 py-4 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
             <span>{visibleItems.length} von {counts.total} ASINs angezeigt</span>
-            <span>OOS-Prognose = verfügbarer Bestand ÷ Ø Tagesabsatz der letzten 30 Tage. Inbound ist nicht eingerechnet.</span>
+            <span>Prognose: gleicher Vorjahresmonat × stabilisiertes positives Wachstum der abgeschlossenen Monate. Ohne Vorjahresdaten gilt der 30T-Absatz. Inbound ist nicht eingerechnet.</span>
           </div>
         </>
       )}
