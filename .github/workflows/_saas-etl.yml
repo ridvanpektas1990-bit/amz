@@ -6,7 +6,7 @@ on:
       period_year:   { type: string, required: false, description: "YYYY (leer = Vormonat)" }
       period_month:  { type: string, required: false, description: "M oder MM (leer = Vormonat)" }
       tenants:       { type: string, required: false, default: "ALL", description: "CSV (Filter) oder ALL" }
-      which:         { type: string, required: false, default: "beides", description: "fees|orders|beides" }
+      which:         { type: string, required: false, default: "orders", description: "orders|fees|beides" }
       max_parallel:  { type: string, required: false, default: "2" }
     secrets:
       SUPABASE_URL:              { required: true }
@@ -165,16 +165,20 @@ jobs:
               y0 = (date.today().replace(day=1) - timedelta(days=months*30)).year
               mid = CODE2ID.get(code)
 
-              if mid:
+              # marketplace column stores codes (DE) in current schema; keep ID fallback.
+              for mp_key in (code, mid):
+                  if not mp_key:
+                      continue
                   uo = (f"{sb_url}/rest/v1/amazon_orders"
-                        f"?tenant_id=eq.{tenant}&marketplace=eq.{mid}&period_year=gte.{y0}"
-                        f"&select=amazon_order_id")
+                        f"?tenant_id=eq.{tenant}&marketplace=eq.{mp_key}"
+                        f"&select=amazon_order_id&limit=1")
                   if _count(uo) > 0:
                       return True
 
+              # Fees optional (table may be dropped for logistics-only tenants)
               uf = (f"{sb_url}/rest/v1/amazon_fees"
-                    f"?tenant_id=eq.{tenant}&marketplace=eq.{code}&period_year=gte.{y0}"
-                    f"&select=amazon_order_id")
+                    f"?tenant_id=eq.{tenant}&marketplace=eq.{code}"
+                    f"&select=amazon_order_id&limit=1")
               return _count(uf) > 0
 
           EU = {"DE","FR","IT","ES","GB","NL","SE","PL","BE","TR","AE","SA","EG"}
@@ -498,6 +502,46 @@ jobs:
         run: |
           python "${{ steps.detect.outputs.orders_script }}"
 
+      - name: Log success into etl_runs
+        if: success()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SRK: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TENANT_ID: ${{ matrix.tenant }}
+          MP: ${{ matrix.marketplace }}
+          YY: ${{ needs.prep-matrix.outputs.year }}
+          MM: ${{ needs.prep-matrix.outputs.month }}
+          RUN_ID: ${{ github.run_id }}
+          WHICH: ${{ inputs.which }}
+        run: |
+          set -e
+          NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          NOTE="OK via GitHub Actions run ${RUN_ID} (which=${WHICH}) at ${NOW}."
+          echo "==> Writing success into etl_runs…"
+          curl -sS -X POST "${SUPABASE_URL%/}/rest/v1/etl_runs" \
+            -H "apikey: ${SRK}" \
+            -H "Authorization: Bearer ${SRK}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d "$(jq -n \
+                  --arg t  "$TENANT_ID" \
+                  --arg mp "$MP" \
+                  --arg y  "$YY" \
+                  --arg m  "$MM" \
+                  --arg note "$NOTE" \
+                  --arg now "$NOW" \
+                  '{
+                      tenant_id: $t,
+                      marketplace: $mp,
+                      period_year: ($y|tonumber),
+                      period_month: ($m|tonumber),
+                      status: "success",
+                      started_at: $now,
+                      finished_at: $now,
+                      run_log: $note
+                    }')"
+          echo "Success row written."
+
       # === Auto-Retry bei Fehlschlag (Orders + Fees) ===
       - name: Requeue on failure + log note into etl_runs
         if: failure()
@@ -538,7 +582,7 @@ jobs:
                       run_log: $note
                     }')"
 
-          echo "==> Fire repository_dispatch: etl-retry (beides)…"
+          echo "==> Fire repository_dispatch: etl-retry (orders)…"
           OWNER="${{ github.repository_owner }}"
           REPO="$(echo "${{ github.repository }}" | cut -d'/' -f2)"
           curl -sS -X POST \
@@ -550,6 +594,6 @@ jobs:
                   --arg y   "$YY" \
                   --arg m   "$MM" \
                   --argjson d ${RETRY_DELAY_SECONDS} \
-                  '{event_type:"etl-retry", client_payload:{tenant:$t, year:($y|tonumber), month:($m|tonumber), which:"beides", delay_seconds:$d}}')"
+                  '{event_type:"etl-retry", client_payload:{tenant:$t, year:($y|tonumber), month:($m|tonumber), which:"orders", delay_seconds:$d}}')"
 
-          echo "Requeue (Orders+Fees) scheduled."
+          echo "Requeue (Orders) scheduled."

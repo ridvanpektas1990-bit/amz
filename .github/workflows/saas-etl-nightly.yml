@@ -1,10 +1,9 @@
 name: SaaS ETL (nightly)
 
 on:
-  # Täglich um 02:12 UTC. Passe die Uhrzeit bei Bedarf an.
+  # Täglich um 02:12 UTC — nur Orders (keine Fees).
   schedule:
     - cron: "12 2 * * *"
-  # Optional: Manuell aus dem Actions-Tab startbar
   workflow_dispatch: {}
 
 permissions:
@@ -12,20 +11,33 @@ permissions:
   actions: write
 
 jobs:
-  # Ermittelt das aktuelle Jahr/Monat (M0) für den heutigen Lauf
+  # Ermittelt aktuelles Jahr/Monat (M0) und Vormonat (M-1)
   prep-now:
     runs-on: ubuntu-latest
     outputs:
       year: ${{ steps.now.outputs.year }}
       month: ${{ steps.now.outputs.month }}
+      prev_year: ${{ steps.now.outputs.prev_year }}
+      prev_month: ${{ steps.now.outputs.prev_month }}
     steps:
       - id: now
         shell: bash
         run: |
-          echo "year=$(date -u +%Y)" >> "$GITHUB_OUTPUT"
-          echo "month=$(date -u +%-m)" >> "$GITHUB_OUTPUT"
+          year="$(date -u +%Y)"
+          month="$(date -u +%-m)"
+          if [ "$month" -eq 1 ]; then
+            prev_year="$((year - 1))"
+            prev_month="12"
+          else
+            prev_year="$year"
+            prev_month="$((month - 1))"
+          fi
+          echo "year=$year" >> "$GITHUB_OUTPUT"
+          echo "month=$month" >> "$GITHUB_OUTPUT"
+          echo "prev_year=$prev_year" >> "$GITHUB_OUTPUT"
+          echo "prev_month=$prev_month" >> "$GITHUB_OUTPUT"
 
-  # M0: aktueller Monat (holt die Outputs aus prep-now)
+  # M0: aktueller Monat — Orders only (Logistik)
   etl-current-month:
     needs: prep-now
     uses: ./.github/workflows/_saas-etl.yml
@@ -34,5 +46,17 @@ jobs:
       period_year:  ${{ needs.prep-now.outputs.year }}
       period_month: ${{ needs.prep-now.outputs.month }}
       tenants: ${{ vars.ACTIVE_TENANTS || 'ALL' }}
-      which: "beides"
+      which: "orders"
+      max_parallel: 1
+
+  # M-1: Vormonat erneut (schließt Order-Lücken)
+  etl-previous-month:
+    needs: [prep-now, etl-current-month]
+    uses: ./.github/workflows/_saas-etl.yml
+    secrets: inherit
+    with:
+      period_year:  ${{ needs.prep-now.outputs.prev_year }}
+      period_month: ${{ needs.prep-now.outputs.prev_month }}
+      tenants: ${{ vars.ACTIVE_TENANTS || 'ALL' }}
+      which: "orders"
       max_parallel: 1

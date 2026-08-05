@@ -64,7 +64,7 @@ jobs:
                 "-f",f"period_year={yy}",
                 "-f",f"period_month={mm}",
                 "-f",f"tenants={tenant}",
-                "-f","which=beides"
+                "-f","which=orders"
               ]
               print("RUN:", " ".join(cmd))
               subprocess.run(cmd, check=True)

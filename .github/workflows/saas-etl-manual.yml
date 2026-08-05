@@ -16,7 +16,7 @@ on:
         required: true
         default: "ALL"
       which:
-        description: "fees | orders | beides"
+        description: "orders (default) | fees | beides — Fees für Logistik-SaaS nicht nötig"
         required: true
         default: "orders"
       max_parallel:

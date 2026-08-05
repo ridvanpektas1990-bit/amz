@@ -33,8 +33,8 @@ jobs:
           Y="${{ github.event.client_payload.year }}"
           M="${{ github.event.client_payload.month }}"
           TENANT="${{ github.event.client_payload.tenant }}"
-          # Default jetzt: beides (Orders + Fees)
-          WHICH="${{ github.event.client_payload.which || 'beides' }}"
+          # Logistik-Default: nur Orders (Fees optional via payload)
+          WHICH="${{ github.event.client_payload.which || 'orders' }}"
 
           if [ -z "$Y" ] || [ -z "$M" ] || [ -z "$TENANT" ]; then
             echo "::error::Missing required payload: year/month/tenant"

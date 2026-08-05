@@ -63,7 +63,7 @@ jobs:
       period_year:  ${{ matrix.item.year }}
       period_month: ${{ matrix.item.month }}
       tenants:      ${{ github.event.client_payload.tenant }}
-      which:        "beides"
+      which:        "orders"
       max_parallel: "2"
     secrets: inherit
 
@@ -80,6 +80,6 @@ jobs:
       period_year:  ${{ matrix.item.year }}
       period_month: ${{ matrix.item.month }}
       tenants:      ${{ github.event.client_payload.tenant }}
-      which:        "beides"
+      which:        "orders"
       max_parallel: "2"
     secrets: inherit

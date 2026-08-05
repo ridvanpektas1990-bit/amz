@@ -1,0 +1,103 @@
+name: Order Items Report (nightly)
+
+# Recurring flat-file report → amazon_order_items (FBA + FBM).
+# Runs after SaaS Orders nightly (02:12 UTC).
+
+on:
+  schedule:
+    - cron: "40 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tenants:
+        description: "CSV von tenant_id(s) oder ALL"
+        required: true
+        default: "ALL"
+      marketplace:
+        description: "Marketplace-Code"
+        required: true
+        default: "DE"
+      lookback_days:
+        description: "Lookback in Tagen (1..30)"
+        required: false
+        default: "14"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: order-items-report-${{ github.event.inputs.marketplace || 'DE' }}
+  cancel-in-progress: false
+
+jobs:
+  prep-tenants:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      count: ${{ steps.mk.outputs.count }}
+    steps:
+      - id: mk
+        env:
+          IN_TENANTS: ${{ github.event.inputs.tenants || vars.ACTIVE_TENANTS || 'ALL' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python - << 'PY'
+          import json, os, urllib.request
+          sb = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+          key = os.getenv("SUPABASE_KEY") or ""
+          filt = [x.strip() for x in (os.getenv("IN_TENANTS") or "ALL").split(",") if x.strip()]
+          req = urllib.request.Request(
+              f"{sb}/rest/v1/amazon_connections?select=tenant_id,region",
+              headers={"apikey": key, "Authorization": f"Bearer {key}"},
+          )
+          with urllib.request.urlopen(req, timeout=45) as r:
+              rows = json.loads(r.read().decode("utf-8"))
+          seen = set()
+          items = []
+          for row in rows:
+              tid = (row.get("tenant_id") or "").strip()
+              if not tid or tid in seen:
+                  continue
+              if filt != ["ALL"] and tid not in filt:
+                  continue
+              seen.add(tid)
+              items.append({"tenant": tid, "region": (row.get("region") or "eu")})
+          print("TENANTS:", items)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps({'include': items})}\n")
+              f.write(f"count={len(items)}\n")
+          if not items:
+              raise SystemExit("No tenants selected for order-items report")
+          PY
+
+  sync:
+    needs: prep-tenants
+    if: ${{ needs.prep-tenants.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.prep-tenants.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -U python-amazon-sp-api supabase python-dotenv tzdata
+
+      - name: Run order-items report sync
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LWA_CLIENT_ID: ${{ secrets.LWA_CLIENT_ID }}
+          LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
+          TENANT_ID: ${{ matrix.tenant }}
+          MARKETPLACE: ${{ github.event.inputs.marketplace || 'DE' }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '14' }}
+          LOCAL_TZ: ${{ vars.LOCAL_TZ || 'Europe/Berlin' }}
+          SUPABASE_BATCH_SIZE: ${{ vars.SUPABASE_BATCH_SIZE || '300' }}
+        run: python Python/libs/orders/AmzT_OrderItems_Report.py
