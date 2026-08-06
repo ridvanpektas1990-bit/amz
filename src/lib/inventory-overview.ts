@@ -132,8 +132,20 @@ export function selectOosRiskItems(
   limit = 8,
 ): InventoryOverviewItem[] {
   return rankInventoryRisk(items)
-    .filter((item) => item.status === "out" || item.status === "critical" || item.status === "warning")
+    .filter((item) => item.status === "out" || item.status === "critical")
     .slice(0, limit);
+}
+
+/** Scope overview rows to the ASIN of a selected SKU (all SKUs under that ASIN). */
+export function filterItemsBySelectedSku(
+  items: InventoryOverviewItem[],
+  selectedSku: string | null | undefined,
+): InventoryOverviewItem[] {
+  const sku = selectedSku?.trim();
+  if (!sku) return items;
+  const match = items.find((item) => item.sku === sku);
+  if (!match?.asin) return items.filter((item) => item.sku === sku);
+  return items.filter((item) => item.asin === match.asin);
 }
 
 export function inventoryActionHint(item: InventoryOverviewItem): string {

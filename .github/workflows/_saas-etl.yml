@@ -8,6 +8,8 @@ on:
       tenants:       { type: string, required: false, default: "ALL", description: "CSV (Filter) oder ALL" }
       which:         { type: string, required: false, default: "orders", description: "orders|fees|beides" }
       max_parallel:  { type: string, required: false, default: "2" }
+      # >0 enables rolling lookback in AmzT_Sales (ORDERS_LOOKBACK_DAYS); 0/empty = month mode
+      lookback_days: { type: string, required: false, default: "0", description: "Orders rolling days (0=month)" }
     secrets:
       SUPABASE_URL:              { required: true }
       SUPABASE_SERVICE_ROLE_KEY: { required: true }
@@ -483,7 +485,7 @@ jobs:
           if miss: sys.exit(1)
           PY
 
-      - name: Run Orders (last month)
+      - name: Run Orders
         if: ${{ inputs.which == 'beides' || inputs.which == 'orders' }}
         env:
           LWA_APP_ID:        ${{ secrets.LWA_CLIENT_ID }}
@@ -497,6 +499,7 @@ jobs:
           MARKETPLACE: ${{ matrix.marketplace }}
           ORDERS_YEAR:  ${{ needs.prep-matrix.outputs.year }}
           ORDERS_MONTH: ${{ needs.prep-matrix.outputs.month }}
+          ORDERS_LOOKBACK_DAYS: ${{ inputs.lookback_days || '0' }}
           ORDERS_DATE_MODE: "created"
           LOCAL_TZ:    ${{ vars.LOCAL_TZ && vars.LOCAL_TZ || 'Europe/Istanbul' }}
         run: |
@@ -513,10 +516,15 @@ jobs:
           MM: ${{ needs.prep-matrix.outputs.month }}
           RUN_ID: ${{ github.run_id }}
           WHICH: ${{ inputs.which }}
+          LOOKBACK: ${{ inputs.lookback_days || '0' }}
         run: |
           set -e
           NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          NOTE="OK via GitHub Actions run ${RUN_ID} (which=${WHICH}) at ${NOW}."
+          if [ "${LOOKBACK}" != "0" ] && [ -n "${LOOKBACK}" ]; then
+            NOTE="[orders] OK via GitHub Actions run ${RUN_ID} (which=${WHICH}, lookback=${LOOKBACK}d) at ${NOW}."
+          else
+            NOTE="[orders] OK via GitHub Actions run ${RUN_ID} (which=${WHICH}, period=${YY}-${MM}) at ${NOW}."
+          fi
           echo "==> Writing success into etl_runs…"
           curl -sS -X POST "${SUPABASE_URL%/}/rest/v1/etl_runs" \
             -H "apikey: ${SRK}" \
@@ -560,7 +568,7 @@ jobs:
 
           # 1) Laufzeit für „geplanter Neuversuch“ berechnen (UTC-ISO)
           NEXT_TS="$(date -u -d "@$(( $(date +%s) + ${RETRY_DELAY_SECONDS} ))" +"%Y-%m-%dT%H:%M:%SZ")"
-          NOTE="Auto-Retry (Orders+Fees) geplant um ${NEXT_TS} UTC (in ${RETRY_DELAY_SECONDS}s). Grund: Workflow-Failure."
+          NOTE="[orders] Auto-Retry geplant um ${NEXT_TS} UTC (in ${RETRY_DELAY_SECONDS}s). Grund: Workflow-Failure. which=${{ inputs.which }}"
 
           echo "==> Writing note into etl_runs…"
           curl -sS -X POST "${SUPABASE_URL%/}/rest/v1/etl_runs" \

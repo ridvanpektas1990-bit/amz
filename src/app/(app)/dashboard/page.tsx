@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Bar,
   BarChart,
@@ -15,6 +16,7 @@ import {
   Customized, // <— wichtig für den Hover-Hotspot
 } from "recharts";
 import {
+  InventorySummarySection,
   InventoryTableSection,
 } from "@/components/InventoryMvpSection";
 import ShowInactiveListingsToggle from "@/components/ShowInactiveListingsToggle";
@@ -401,7 +403,7 @@ function YearChart({
       </div>
 
       {/* Chart */}
-      <div className="w-full h-[400px]">
+      <div className="w-full h-[280px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
             data={data}
@@ -606,7 +608,12 @@ function SkuProductSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [menuBox, setMenuBox] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(
+    null,
+  );
   const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const selected = options.find((option) => option.value === value) || null;
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -614,17 +621,57 @@ function SkuProductSelect({
     return options.filter((option) =>
       [option.productName, option.asin, option.label]
         .filter(Boolean)
-        .some((entry) => String(entry).toLowerCase().includes(term))
+        .some((entry) => String(entry).toLowerCase().includes(term)),
     );
   }, [options, query]);
 
   useEffect(() => {
+    if (!open) {
+      setMenuBox(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const button = buttonRef.current;
+      if (!button) return;
+      const rect = button.getBoundingClientRect();
+      const gap = 8;
+      const width = Math.min(Math.max(rect.width, 360), window.innerWidth - 24);
+      const left = Math.min(Math.max(12, rect.left), window.innerWidth - width - 12);
+      const spaceBelow = window.innerHeight - rect.bottom - gap - 12;
+      const spaceAbove = rect.top - gap - 12;
+      const preferBelow = spaceBelow >= 240 || spaceBelow >= spaceAbove;
+      const maxHeight = Math.max(180, Math.min(420, preferBelow ? spaceBelow : spaceAbove));
+      const top = preferBelow ? rect.bottom + gap : Math.max(12, rect.top - gap - maxHeight);
+      setMenuBox({ top, left, width, maxHeight });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
     };
     document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, []);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   function choose(nextValue: string) {
     onChange(nextValue);
@@ -632,19 +679,123 @@ function SkuProductSelect({
     setOpen(false);
   }
 
+  const menu =
+    open && !disabled && menuBox
+      ? createPortal(
+          <div
+            ref={menuRef}
+            style={{
+              position: "fixed",
+              top: menuBox.top,
+              left: menuBox.left,
+              width: menuBox.width,
+              maxHeight: menuBox.maxHeight,
+              zIndex: 200,
+            }}
+            className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+          >
+            <div className="shrink-0 border-b border-slate-200 p-2">
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setOpen(false);
+                }}
+                placeholder="Produkt, ASIN oder SKU suchen …"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+              />
+            </div>
+            <div role="listbox" className="min-h-0 flex-1 overflow-y-auto p-1">
+              <button
+                type="button"
+                role="option"
+                aria-selected={!value}
+                onClick={() => choose("")}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${!value ? "bg-sky-50" : ""}`}
+              >
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-[9px] font-semibold uppercase text-slate-400">
+                  Alle
+                </div>
+                <div>
+                  <div className="text-sm font-semibold">Alle Produkte</div>
+                  <div className="text-xs text-slate-500">Gesamten Verkauf anzeigen</div>
+                </div>
+              </button>
+              {filtered.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === value}
+                  onClick={() => choose(option.value)}
+                  className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${
+                    option.value === value ? "bg-sky-50" : ""
+                  }`}
+                >
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
+                    {option.imageUrl ? (
+                      <img
+                        src={option.imageUrl}
+                        alt=""
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        className="h-full w-full object-contain p-0.5"
+                        onError={(event) => {
+                          event.currentTarget.style.display = "none";
+                        }}
+                      />
+                    ) : (
+                      <span className="text-[9px] font-semibold uppercase text-slate-400">Kein Bild</span>
+                    )}
+                  </div>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold text-slate-900">
+                      {option.productName || option.label}
+                    </span>
+                    <span className="block truncate text-xs text-slate-500">
+                      {[
+                        option.asin,
+                        option.label,
+                        typeof option.dailySales30 === "number"
+                          ? `Ø ${option.dailySales30.toFixed(1).replace(".", ",")} / Tag`
+                          : null,
+                        option.active === false ? "inaktiv" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </span>
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="px-3 py-8 text-center text-sm text-slate-500">Kein Produkt gefunden.</div>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <div ref={rootRef} className="relative w-full max-w-xl">
       <button
+        ref={buttonRef}
         type="button"
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
-        className="flex min-h-14 w-full items-center gap-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left shadow-sm transition hover:border-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+        className="flex min-h-14 w-full items-center gap-3 rounded-xl border-2 border-sky-300/80 bg-gradient-to-r from-sky-50 via-white to-teal-50/60 px-3 py-2 text-left shadow-md shadow-sky-100/60 transition hover:border-sky-400 hover:shadow-lg hover:shadow-sky-100/80 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:shadow-none"
       >
         <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
           {selected?.imageUrl ? (
-            <img src={selected.imageUrl} alt="" className="h-full w-full object-contain p-0.5" referrerPolicy="no-referrer" />
+            <img
+              src={selected.imageUrl}
+              alt=""
+              className="h-full w-full object-contain p-0.5"
+              referrerPolicy="no-referrer"
+            />
           ) : (
             <span className="text-[9px] font-semibold uppercase text-slate-400">Alle</span>
           )}
@@ -667,76 +818,22 @@ function SkuProductSelect({
               : "Gesamten Verkauf anzeigen · sortiert nach Absatz"}
           </span>
         </span>
-        <svg viewBox="0 0 20 20" aria-hidden="true" className={`h-4 w-4 shrink-0 text-slate-500 transition ${open ? "rotate-180" : ""}`}>
-          <path d="m5 7.5 5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        <svg
+          viewBox="0 0 20 20"
+          aria-hidden="true"
+          className={`h-4 w-4 shrink-0 text-slate-500 transition ${open ? "rotate-180" : ""}`}
+        >
+          <path
+            d="m5 7.5 5 5 5-5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
       </button>
-
-      {open && !disabled && (
-        <div className="absolute z-50 mt-2 w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl">
-          <div className="border-b border-slate-200 p-2">
-            <input
-              autoFocus
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}
-              placeholder="Produkt, ASIN oder SKU suchen …"
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-            />
-          </div>
-          <div role="listbox" className="max-h-96 overflow-y-auto p-1">
-            <button
-              type="button"
-              role="option"
-              aria-selected={!value}
-              onClick={() => choose("")}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${!value ? "bg-blue-50" : ""}`}
-            >
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-[9px] font-semibold uppercase text-slate-400">Alle</div>
-              <div><div className="text-sm font-semibold">Alle Produkte</div><div className="text-xs text-slate-500">Gesamten Verkauf anzeigen</div></div>
-            </button>
-            {filtered.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                role="option"
-                aria-selected={option.value === value}
-                onClick={() => choose(option.value)}
-                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${option.value === value ? "bg-blue-50" : ""}`}
-              >
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
-                  {option.imageUrl ? (
-                    <img
-                      src={option.imageUrl}
-                      alt=""
-                      loading="lazy"
-                      referrerPolicy="no-referrer"
-                      className="h-full w-full object-contain p-0.5"
-                      onError={(event) => { event.currentTarget.style.display = "none"; }}
-                    />
-                  ) : <span className="text-[9px] font-semibold uppercase text-slate-400">Kein Bild</span>}
-                </div>
-          <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold text-slate-900">{option.productName || option.label}</span>
-                  <span className="block truncate text-xs text-slate-500">
-                    {[
-                      option.asin,
-                      option.label,
-                      typeof option.dailySales30 === "number"
-                        ? `Ø ${option.dailySales30.toFixed(1).replace(".", ",")} / Tag`
-                        : null,
-                      option.active === false ? "inaktiv" : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
-                </span>
-              </button>
-            ))}
-            {filtered.length === 0 && <div className="px-3 py-8 text-center text-sm text-slate-500">Kein Produkt gefunden.</div>}
-          </div>
-        </div>
-      )}
+      {menu}
     </div>
   );
 }
@@ -767,6 +864,21 @@ export default function DashboardPage() {
   const [showOlderYearChart, setShowOlderYearChart] = useState(false);
   const [cartonSpec, setCartonSpec] = useState<CartonSpecRow | null>(null);
   const [reorderDetailsOpen, setReorderDetailsOpen] = useState(false);
+
+  useEffect(() => {
+    setReorderDetailsOpen(false);
+  }, [sku]);
+
+  useEffect(() => {
+    if (!reorderDetailsOpen) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.("[data-reorder-info]")) return;
+      setReorderDetailsOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [reorderDetailsOpen]);
 
   const inventory = useInventoryOverview(showInactiveListings);
 
@@ -1089,7 +1201,12 @@ export default function DashboardPage() {
 
   function focusSku(nextSku: string) {
     setSku(nextSku);
-    document.getElementById("product-filter")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // Nachbestellblock mounts after SKU state update — scroll on next ticks.
+    window.setTimeout(() => {
+      const target =
+        document.getElementById("nachbestellung") || document.getElementById("product-filter");
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
   }
 
   const chartToggleClass = (active: boolean) =>
@@ -1108,10 +1225,10 @@ export default function DashboardPage() {
 
         <section
           id="product-filter"
-          className="mb-4 scroll-mt-4 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm md:p-4"
+          className="mb-4 scroll-mt-4 rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-50 via-white to-sky-50/40 shadow-sm"
         >
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="px-3 py-3 md:px-4 md:py-4">
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:flex-wrap">
               <SkuProductSelect
                 options={visibleSkus}
                 value={sku}
@@ -1119,23 +1236,35 @@ export default function DashboardPage() {
                 disabled={skuLoading || !skus}
               />
               {!!sku && (
-                <button className="text-xs font-medium text-slate-600 underline" onClick={() => setSku("")}>
-                  Alle
+                <button
+                  type="button"
+                  className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
+                  onClick={() => setSku("")}
+                >
+                  Alle Produkte
                 </button>
               )}
+              <ShowInactiveListingsToggle
+                checked={showInactiveListings}
+                onChange={updateShowInactiveListings}
+                activeCount={skuMeta?.activeCount}
+                inactiveCount={skuMeta?.inactiveCount}
+              />
             </div>
-            <ShowInactiveListingsToggle
-              checked={showInactiveListings}
-              onChange={updateShowInactiveListings}
-              activeCount={skuMeta?.activeCount}
-              inactiveCount={skuMeta?.inactiveCount}
-            />
-          </div>
+
+          {!sku && !skuLoading && !skuLoadErr && (
+            <p className="mt-3 rounded-xl border border-slate-200/80 bg-white/70 px-3 py-2.5 text-sm text-slate-600 shadow-sm backdrop-blur-[2px]">
+              Noch kein Produkt gewählt. Nutze den Überblick unten oder wähle eine SKU, um die Nachbestellung zu sehen.
+            </p>
+          )}
 
           {sku && leadTimeDays == null && (
-            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-950">
+            <div
+              id="nachbestellung"
+              className="mt-3 scroll-mt-4 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 shadow-sm"
+            >
               Für die Nachbestellung fehlen Produktions- und Lieferdauer.{" "}
-              <Link href="/sku-stammdaten" className="font-semibold underline">
+              <Link href="/sku-stammdaten" className="font-semibold text-slate-900 underline">
                 In SKU-Stammdaten hinterlegen
               </Link>
             </div>
@@ -1143,13 +1272,8 @@ export default function DashboardPage() {
 
           {sku && leadTimeDays != null && reorderTiming && (
             <div
-              className={`mt-3 rounded-xl border px-4 py-3 shadow-sm ${
-                reorderTiming.status === "too_late" || reorderTiming.status === "already_oos"
-                  ? "border-red-300 bg-red-50"
-                  : reorderTiming.status === "order_now"
-                    ? "border-amber-300 bg-amber-50"
-                    : "border-slate-200 bg-white"
-              }`}
+              id="nachbestellung"
+              className="mt-3 scroll-mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm"
             >
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                 Wann bestellen?{" "}
@@ -1168,14 +1292,14 @@ export default function DashboardPage() {
 
               {reorderTiming.status === "already_oos" && (
                 <div className="mt-1">
-                  <div className="text-lg font-semibold text-red-800">Bereits OOS</div>
+                  <div className="text-lg font-semibold text-red-700">Bereits OOS</div>
                 </div>
               )}
 
               {reorderTiming.status === "order_now" && (
                 <div className="mt-1">
-                  <div className="text-lg font-semibold text-amber-950">Jetzt bestellen</div>
-                  <p className="mt-1 text-sm leading-relaxed text-amber-950/80">
+                  <div className="text-lg font-semibold text-amber-800">Jetzt bestellen</div>
+                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
                     OOS in ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tagen – genau die Lieferzeit.
                     Heute ist der letzte sinnvolle Bestelltag.
                   </p>
@@ -1197,28 +1321,42 @@ export default function DashboardPage() {
                 </div>
               )}
 
-              <div className="mt-3 grid gap-2 border-t border-slate-200/80 pt-3 text-sm sm:grid-cols-3">
-                <div className="rounded-lg bg-white/70 px-3 py-2 ring-1 ring-slate-200/80">
-                  <div className="text-[11px] font-medium text-slate-500">Aktueller Stand</div>
-                  <div className="mt-0.5 font-semibold text-slate-900">
+              <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 text-sm sm:grid-cols-3">
+                <div className="rounded-lg border border-sky-100 bg-sky-50/80 px-3 py-2.5">
+                  <div className="text-[11px] font-medium text-sky-700/80">Aktueller Stand</div>
+                  <div className="mt-0.5 font-semibold text-sky-950">
                     {reorderTiming.daysUntilOos === null
                       ? "Kein Tempo"
                       : reorderTiming.daysUntilOos === 0
                         ? "Jetzt leer"
                         : `Noch ca. ${nfTop.format(reorderTiming.daysUntilOos)} Tage`}
                   </div>
-                  <div className="mt-0.5 text-xs text-slate-600">
+                  <div className="mt-0.5 text-xs text-sky-800/70">
                     {inventoryLeft != null ? `${nfTop.format(Math.round(inventoryLeft))} Stück` : "–"}
                     {inventoryInbound > 0 ? ` inkl. +${nfTop.format(inventoryInbound)} Inbound` : ""}
                   </div>
                 </div>
-                <div className="rounded-lg bg-white/70 px-3 py-2 ring-1 ring-slate-200/80">
-                  <div className="text-[11px] font-medium text-slate-500">Lieferverzug</div>
+                <div
+                  className={`rounded-lg border px-3 py-2.5 ${
+                    reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
+                      ? "border-rose-100 bg-rose-50/80"
+                      : "border-emerald-100 bg-emerald-50/80"
+                  }`}
+                >
+                  <div
+                    className={`text-[11px] font-medium ${
+                      reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
+                        ? "text-rose-700/80"
+                        : "text-emerald-700/80"
+                    }`}
+                  >
+                    Lieferverzug
+                  </div>
                   <div
                     className={`mt-0.5 font-semibold tabular-nums ${
                       reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
-                        ? "text-red-800"
-                        : "text-slate-900"
+                        ? "text-rose-800"
+                        : "text-emerald-950"
                     }`}
                   >
                     {reorderTiming.daysUntilMustOrder == null
@@ -1230,23 +1368,71 @@ export default function DashboardPage() {
                           : "kein Verzug"}
                   </div>
                   {reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder > 0 && (
-                    <div className="mt-0.5 text-xs text-slate-600">
+                    <div className="mt-0.5 text-xs text-emerald-800/70">
                       noch {nfTop.format(reorderTiming.daysUntilMustOrder)} Tage bis Bestellfrist
                     </div>
                   )}
                   {reorderTiming.daysUntilMustOrder === 0 && (
-                    <div className="mt-0.5 text-xs text-slate-600">Bestellfrist ist heute</div>
+                    <div className="mt-0.5 text-xs text-emerald-800/70">Bestellfrist ist heute</div>
                   )}
                 </div>
-                <div className="rounded-lg bg-white/70 px-3 py-2 ring-1 ring-slate-200/80">
-                  <div className="text-[11px] font-medium text-slate-500">Nachbestellung</div>
-                  <div className="mt-0.5 font-semibold tabular-nums text-slate-900">
+                <div className="relative rounded-lg border border-teal-100 bg-teal-50/80 px-3 py-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="text-[11px] font-medium text-teal-700/80">Nachbestellung</div>
+                    <div className="relative shrink-0" data-reorder-info>
+                      <button
+                        type="button"
+                        aria-label="Rechnung und Nachbestellmenge erklären"
+                        aria-expanded={reorderDetailsOpen}
+                        onClick={() => setReorderDetailsOpen((open) => !open)}
+                        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-teal-300/80 bg-white text-[11px] font-semibold text-teal-700 transition hover:border-teal-400 hover:bg-teal-50"
+                      >
+                        i
+                      </button>
+                      {reorderDetailsOpen && (
+                        <div className="absolute right-0 top-full z-40 mt-2 w-80 max-w-[min(20rem,calc(100vw-2rem))] space-y-2 rounded-xl border border-slate-200 bg-white p-3 text-left text-xs leading-relaxed text-slate-600 shadow-xl">
+                          <p className="font-semibold text-slate-800">Rechnung & Nachbestellmenge</p>
+                          <p>
+                            <strong className="text-slate-800">Bestellfrist:</strong> Tage bis OOS − Lieferzeit ={" "}
+                            {reorderTiming.daysUntilOos == null
+                              ? "–"
+                              : `${reorderTiming.daysUntilOos} − ${leadTimeDays} = ${reorderTiming.daysUntilMustOrder}`}
+                            . Negativ = Lieferverzug (OOS-Tage vor Ankunft).
+                          </p>
+                          <p>
+                            <strong className="text-slate-800">Nachbestellmenge:</strong> Vorjahresbedarf (ggf. mit
+                            Wachstum, sonst aktuelles Verkaufstempo ab erstem Verkaufstag) über{" "}
+                            {reorderPlanTop
+                              ? `${reorderPlanTop.coverDays} Tage = ${reorderPlanTop.leadTimeDays} Lieferzeit` +
+                                (reorderPlanTop.bufferDays > 0
+                                  ? ` + ${reorderPlanTop.bufferDays} Puffer`
+                                  : "")
+                              : "Charge-Zeitraum"}
+                            , beginnend ab erwarteter Ankunft – nicht abzüglich aktuellem Bestand.
+                            {reorderPlanTop
+                              ? ` Prognose ${nfTop.format(Math.round(reorderPlanTop.shipmentDemand))} Stück`
+                              : ""}
+                            {cartonOrder?.rounded
+                              ? `, auf volle Kartons = ${nfTop.format(cartonOrder.orderQty)} Stück`
+                              : cartonOrder && cartonOrder.orderQty > 0
+                                ? ` = ${nfTop.format(cartonOrder.orderQty)} Stück`
+                                : ""}
+                            .
+                          </p>
+                          <Link href="/sku-stammdaten" className="inline-block text-slate-600 underline">
+                            Stammdaten / Pufferzeit anpassen
+                          </Link>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-0.5 font-semibold tabular-nums text-teal-950">
                     {cartonOrder && cartonOrder.orderQty > 0
                       ? `${nfTop.format(cartonOrder.orderQty)} Stück`
                       : "nicht nötig"}
                   </div>
                   {reorderPlanTop && cartonOrder && cartonOrder.orderQty > 0 && (
-                    <div className="mt-0.5 text-xs text-slate-600">
+                    <div className="mt-0.5 text-xs text-teal-800/70">
                       Nächste Charge reicht für {nfTop.format(reorderPlanTop.coverDays)} Tage aus
                     </div>
                   )}
@@ -1254,7 +1440,7 @@ export default function DashboardPage() {
               </div>
 
               {reorderTiming.status === "too_late" && (
-                <p className="mt-3 text-sm leading-relaxed text-red-900/80">
+                <p className="mt-3 text-sm leading-relaxed text-slate-600">
                   Bestand reicht noch ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tage. Bestellst du heute,
                   fehlt die Ware {nfTop.format(Math.abs(reorderTiming.daysUntilMustOrder!))} Tage vor Ankunft –
                   in dem Zeitraum kein Verkauf (laut Prognose).
@@ -1262,64 +1448,34 @@ export default function DashboardPage() {
               )}
 
               {reorderTiming.status === "already_oos" && (
-                <p className="mt-3 text-sm leading-relaxed text-red-900/80">
+                <p className="mt-3 text-sm leading-relaxed text-slate-600">
                   Bestand ist leer. Bestellst du heute, kommt Ware erst in {leadTimeDays} Tagen an – so lange
                   kein Verkauf.
                 </p>
-              )}
-
-              <button
-                type="button"
-                onClick={() => setReorderDetailsOpen((open) => !open)}
-                className="mt-2 text-xs font-medium text-slate-500 underline"
-              >
-                {reorderDetailsOpen ? "Erklärung ausblenden" : "Rechnung & Nachbestellmenge"}
-              </button>
-
-              {reorderDetailsOpen && (
-                <div className="mt-2 space-y-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs leading-relaxed text-slate-700">
-                  <p>
-                    <strong>Bestellfrist:</strong> Tage bis OOS − Lieferzeit ={" "}
-                    {reorderTiming.daysUntilOos == null
-                      ? "–"
-                      : `${reorderTiming.daysUntilOos} − ${leadTimeDays} = ${reorderTiming.daysUntilMustOrder}`}
-                    . Negativ = Lieferverzug (OOS-Tage vor Ankunft).
-                  </p>
-                  <p>
-                    <strong>Nachbestellmenge:</strong> Vorjahresbedarf (ggf. mit Wachstum, sonst aktuelles
-                    Verkaufstempo ab erstem Verkaufstag)
-                    über{" "}
-                    {reorderPlanTop
-                      ? `${reorderPlanTop.coverDays} Tage = ${reorderPlanTop.leadTimeDays} Lieferzeit` +
-                        (reorderPlanTop.bufferDays > 0
-                          ? ` + ${reorderPlanTop.bufferDays} Puffer`
-                          : "")
-                      : "Charge-Zeitraum"}
-                    , beginnend ab erwarteter Ankunft – nicht abzüglich aktuellem Bestand.
-                    {reorderPlanTop
-                      ? ` Prognose ${nfTop.format(Math.round(reorderPlanTop.shipmentDemand))} Stück`
-                      : ""}
-                    {cartonOrder?.rounded
-                      ? `, auf volle Kartons = ${nfTop.format(cartonOrder.orderQty)} Stück`
-                      : cartonOrder && cartonOrder.orderQty > 0
-                        ? ` = ${nfTop.format(cartonOrder.orderQty)} Stück`
-                        : ""}
-                    .
-                  </p>
-                  <Link href="/sku-stammdaten" className="inline-block text-slate-600 underline">
-                    Stammdaten / Pufferzeit anpassen
-                  </Link>
-                </div>
               )}
             </div>
           )}
           {skuLoadErr && <div className="mt-2 text-sm text-red-600">{skuLoadErr}</div>}
           {inventoryErr && <div className="mt-2 text-sm text-red-600">{inventoryErr}</div>}
+          </div>
         </section>
+
+        <InventorySummarySection
+          data={inventory.data}
+          loading={inventory.loading}
+          error={inventory.error}
+          selectedSku={sku || undefined}
+          onSelectSku={focusSku}
+        />
 
         <section className="mb-4 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm md:p-4">
           <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-base font-semibold text-slate-950">Jahresvergleich</h2>
+            <div>
+              <h2 className="text-base font-semibold text-slate-950">Jahresvergleich</h2>
+              <p className="text-xs text-slate-500">
+                {sku ? `Einheiten verkauft · ${sku}` : "Einheiten verkauft · alle Produkte"}
+              </p>
+            </div>
             <div className="flex flex-wrap gap-2">
               <button type="button" className={chartToggleClass(showCurrentYearChart)} onClick={() => setShowCurrentYearChart((v) => !v)}>
                 {currentYear}
@@ -1333,8 +1489,17 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {loading && <div className="py-8 text-center text-sm text-slate-500">Lädt …</div>}
-          {err && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+          {loading && (
+            <div className="space-y-3 py-2" aria-busy="true" aria-label="Charts werden geladen">
+              <div className="h-40 animate-pulse rounded-xl bg-slate-100 md:h-44" />
+              <div className="h-40 animate-pulse rounded-xl bg-slate-100 md:h-44" />
+            </div>
+          )}
+          {err && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              Charts konnten nicht geladen werden: {err}
+            </div>
+          )}
 
           {!loading && !err && currentYearData && previousYearData && olderYearData && (
             <div className="space-y-1">
@@ -1379,6 +1544,12 @@ export default function DashboardPage() {
               )}
             </div>
           )}
+
+          {!loading && !err && (!currentYearData || !previousYearData || !olderYearData) && (
+            <p className="py-6 text-center text-sm text-slate-500">
+              Noch keine Verkaufsdaten für den Jahresvergleich.
+            </p>
+          )}
         </section>
 
         <InventoryTableSection
@@ -1387,7 +1558,7 @@ export default function DashboardPage() {
           error={inventory.error}
           onReload={inventory.reload}
           selectedSku={sku}
-          onSelectSku={focusSku}
+          onSelectSku={setSku}
         />
     </div>
   );

@@ -2,14 +2,14 @@
 Nightly / manual order-items sync via Amazon flat-file order reports.
 
 Report: GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL (FBA + FBM)
-Window: last LOOKBACK_DAYS (default 14, max 30 per Amazon).
+Window: last LOOKBACK_DAYS (default 7, max 30 per Amazon).
 
 Env:
   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
   LWA_CLIENT_ID, LWA_CLIENT_SECRET
   TENANT_ID, MARKETPLACE (default DE)
   SP_API_REFRESH_TOKEN (optional; else loaded from amazon_connections)
-  LOOKBACK_DAYS (default 14) OR REPORT_START / REPORT_END (YYYY-MM-DD)
+  LOOKBACK_DAYS (default 7) OR REPORT_START / REPORT_END (YYYY-MM-DD)
   LOCAL_TZ (default Europe/Berlin)
 """
 
@@ -66,7 +66,7 @@ MARKETPLACE_CODE = (os.getenv("MARKETPLACE") or "DE").strip().upper()
 TABLE = (os.getenv("SUPABASE_ORDER_ITEMS_TABLE") or "amazon_order_items").strip()
 LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TZ") or "Europe/Berlin")
 BATCH_SIZE = int(os.getenv("SUPABASE_BATCH_SIZE") or "300")
-LOOKBACK_DAYS = max(1, min(30, int(os.getenv("LOOKBACK_DAYS") or "14")))
+LOOKBACK_DAYS = max(1, min(30, int(os.getenv("LOOKBACK_DAYS") or "7")))
 POLL_SECONDS = int(os.getenv("REPORT_POLL_SECONDS") or "15")
 MAX_POLLS = int(os.getenv("REPORT_MAX_POLLS") or "80")
 try:
@@ -82,6 +82,40 @@ def rest_get(path: str) -> Any:
     )
     with urllib.request.urlopen(request, timeout=45) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def log_etl_run(status: str, note: str) -> None:
+    """Write a monitoring row into etl_runs (best-effort)."""
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    today = datetime.now(LOCAL_TZ).date()
+    payload = {
+        "tenant_id": TENANT_ID,
+        "marketplace": MARKETPLACE_CODE,
+        "period_year": today.year,
+        "period_month": today.month,
+        "status": status,
+        "started_at": now,
+        "finished_at": now,
+        "run_log": f"[order_items] {note}",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/etl_runs",
+        data=body,
+        method="POST",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+        print(f"# etl_runs logged status={status}")
+    except Exception as exc:  # noqa: BLE001 — monitoring must not fail the sync
+        print(f"::warning::etl_runs log failed: {exc}")
 
 
 def load_refresh_token() -> tuple[str, str]:
@@ -292,19 +326,20 @@ def main() -> None:
         )
 
     written = upsert_rows(upserts)
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "tenant_id": TENANT_ID,
-                "marketplace": MARKETPLACE_CODE,
-                "start": start_d.isoformat(),
-                "end": end_d.isoformat(),
-                "report_rows": len(raw_rows),
-                "upserted": written,
-                "skipped": skipped,
-            }
-        )
+    summary = {
+        "ok": True,
+        "tenant_id": TENANT_ID,
+        "marketplace": MARKETPLACE_CODE,
+        "start": start_d.isoformat(),
+        "end": end_d.isoformat(),
+        "report_rows": len(raw_rows),
+        "upserted": written,
+        "skipped": skipped,
+    }
+    print(json.dumps(summary))
+    log_etl_run(
+        "success",
+        f"report {start_d.isoformat()}..{end_d.isoformat()} rows={len(raw_rows)} upserted={written}",
     )
 
 
@@ -315,10 +350,12 @@ if __name__ == "__main__":
         # Stale/revoked connections in amazon_connections should not fail the whole matrix.
         print(f"::warning::Skipping tenant={TENANT_ID}: LWA authorization failed ({exc})")
         print(json.dumps({"ok": False, "skipped": True, "tenant_id": TENANT_ID, "reason": "unauthorized_client"}))
+        log_etl_run("error", f"skipped unauthorized_client: {exc}")
         raise SystemExit(0)
-    except SellingApiForbiddenException:
-        print("403 Forbidden → Reports / Inventory and Order Tracking Rolle prüfen.")
-        raise
-    except SellingApiBadRequestException as exc:
-        print(f"400 Bad Request → {exc}")
+    except Exception as exc:
+        log_etl_run("error", f"{type(exc).__name__}: {exc}")
+        if isinstance(exc, SellingApiForbiddenException):
+            print("403 Forbidden → Reports / Inventory and Order Tracking Rolle prüfen.")
+        elif isinstance(exc, SellingApiBadRequestException):
+            print(f"400 Bad Request → {exc}")
         raise

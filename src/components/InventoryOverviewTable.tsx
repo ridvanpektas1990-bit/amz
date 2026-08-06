@@ -131,9 +131,6 @@ export default function InventoryOverviewTable({
       <div className="flex flex-col gap-2 border-b border-slate-200 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h2 className="text-sm font-semibold text-slate-950">Bestandssteuerung</h2>
-          <span className="text-[11px] tabular-nums text-slate-500">
-            {counts.total} · Snap {formatDate(data?.snapshotDate || null)}
-          </span>
           <div className="flex flex-wrap gap-1">
             {filterChip("all", "Alle", counts.total)}
             {filterChip("risk", "Risiko", counts.out + counts.critical)}
@@ -183,9 +180,9 @@ export default function InventoryOverviewTable({
 
       {!loading && !error && (
         <>
-          <div className="overflow-x-auto">
+          <div className="h-[28rem] overflow-auto">
             <table className="min-w-[760px] w-full border-collapse text-left text-[13px]">
-              <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+              <thead className="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr className="border-b border-slate-200">
                   <th className="px-2.5 py-1.5 font-semibold">Produkt</th>
                   <th className="px-1.5 py-1.5 font-semibold">Status</th>
@@ -212,17 +209,22 @@ export default function InventoryOverviewTable({
                       key={`${item.asin}-${item.sku}`}
                       className={`border-b border-slate-100 ${
                         active
-                          ? "bg-slate-100"
+                          ? "bg-sky-50 shadow-[inset_0_0_0_2px_#38bdf8]"
                           : soonOos
-                            ? "bg-orange-50/90 hover:bg-orange-50"
-                            : "hover:bg-slate-50/80"
+                            ? "bg-orange-50/90"
+                            : ""
                       }`}
                     >
                       <td className="px-2.5 py-1.5">
                         <button
                           type="button"
                           onClick={() => onSelectSku?.(item.sku)}
-                          className="flex max-w-[320px] items-center gap-2 text-left"
+                          title="Produkt im Dashboard öffnen"
+                          className={`flex max-w-[320px] cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left transition ${
+                            active
+                              ? "bg-sky-100/80 ring-1 ring-sky-300"
+                              : "bg-slate-50/80 ring-1 ring-slate-200/80 hover:bg-sky-50 hover:ring-sky-200"
+                          }`}
                         >
                           <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded border border-slate-200 bg-white">
                             {item.imageUrl ? (
@@ -295,10 +297,10 @@ export default function InventoryOverviewTable({
                 })}
               </tbody>
             </table>
+            {!visibleItems.length && (
+              <div className="px-3 py-6 text-center text-sm text-slate-500">Keine Treffer.</div>
+            )}
           </div>
-          {!visibleItems.length && (
-            <div className="px-3 py-6 text-center text-sm text-slate-500">Keine Treffer.</div>
-          )}
           <div className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-500">
             {visibleItems.length}/{counts.total} · Reichweite = Verfügbar + Inbound
           </div>

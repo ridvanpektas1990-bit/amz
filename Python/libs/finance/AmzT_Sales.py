@@ -64,6 +64,8 @@ CREDS = dict(
 MP_CODE = require_env("MARKETPLACE", "DE").upper().strip()
 YEAR = int(os.getenv("ORDERS_YEAR", "2025"))
 MONTH = int(os.getenv("ORDERS_MONTH", "1"))
+# >0 = rolling lookback in local days (overrides month window for nightly sync)
+LOOKBACK_DAYS = max(0, int(os.getenv("ORDERS_LOOKBACK_DAYS") or "0"))
 
 LOCAL_TZ = os.getenv("LOCAL_TZ", "Europe/Istanbul")
 TZ = ZoneInfo(LOCAL_TZ)
@@ -249,12 +251,24 @@ def main():
     mp = pick_marketplace(MP_CODE)
     marketplace_id = mp.marketplace_id  # z.B. A1PA6795UKMFR9 (DE)
 
-    # Monat + 1-Tages-Puffer in lokaler Zeitzone
-    m_start_local, m_next_local = month_bounds_local(YEAR, MONTH, TZ)
-    after_local  = m_start_local - timedelta(days=1)
-    before_local = m_next_local + timedelta(days=1)
+    if LOOKBACK_DAYS > 0:
+        # Rolling window in LOCAL_TZ (e.g. last 7 calendar days including today).
+        today_local = datetime.now(TZ).date()
+        start_date = today_local - timedelta(days=LOOKBACK_DAYS - 1)
+        m_start_local = datetime.combine(start_date, dtime(0, 0), tzinfo=TZ)
+        m_next_local = datetime.combine(today_local + timedelta(days=1), dtime(0, 0), tzinfo=TZ)
+        period_label = f"lookback {LOOKBACK_DAYS}d ({start_date} → {today_local})"
+        # Light pad so Amazon edge timestamps near midnight are not missed.
+        after_local = m_start_local - timedelta(hours=6)
+        before_local = m_next_local
+    else:
+        # Monat + 1-Tages-Puffer in lokaler Zeitzone
+        m_start_local, m_next_local = month_bounds_local(YEAR, MONTH, TZ)
+        period_label = f"{m_start_local.date()} → {m_next_local.date()} (+/-1d padded)"
+        after_local = m_start_local - timedelta(days=1)
+        before_local = m_next_local + timedelta(days=1)
 
-    after_utc  = after_local.astimezone(timezone.utc)
+    after_utc = after_local.astimezone(timezone.utc)
     before_utc = before_local.astimezone(timezone.utc)
 
     # --- CLAMP: 'before_utc' auf maximal gestern 23:59:59 LOCAL_TZ und nie in die Zukunft ---
@@ -266,15 +280,19 @@ def main():
 
     # 2 Minuten Puffer gegen "no later than 2 minutes from now"
     now_utc_safe = datetime.now(timezone.utc) - timedelta(minutes=2)
-    y_end_utc    = end_of_yesterday_utc(TZ)
+    y_end_utc = end_of_yesterday_utc(TZ)
 
-    safe_before_utc = min(before_utc, y_end_utc, now_utc_safe)
+    # Lookback may include "today" → allow now-2min; month mode stays clamped to yesterday.
+    if LOOKBACK_DAYS > 0:
+        safe_before_utc = min(before_utc, now_utc_safe)
+    else:
+        safe_before_utc = min(before_utc, y_end_utc, now_utc_safe)
     if safe_before_utc <= after_utc:
         safe_before_utc = min(now_utc_safe, after_utc + timedelta(seconds=1))
 
     print(f"\n=== Orders Import | {MP_CODE} | TZ={LOCAL_TZ} ===")
     print(f"Tenant         : {TENANT_ID}")
-    print(f"Period (local) : {m_start_local.date()} → {m_next_local.date()} (+/-1d padded)")
+    print(f"Period (local) : {period_label}")
     print(f"API window UTC : {iso_z(after_utc)} → {iso_z(before_utc)}")
     print(f"API window UTC (clamped): {iso_z(after_utc)} → {iso_z(safe_before_utc)}")  # ← neu
     print(f"DateMode       : {DATE_MODE} | Pace {PACE}s | Timeout {REQ_TIMEOUT}s | PerPage {MAX_RESULTS_PER_PAGE}")
@@ -324,7 +342,7 @@ def main():
     if MAX_ORDERS_PER_RUN > 0:
         orders = orders[:MAX_ORDERS_PER_RUN]
 
-    # Filtern auf exakten Monat in lokaler TZ + Mappen
+    # Filtern auf Lookback- bzw. Monatsfenster in lokaler TZ + Mappen
     rows_csv: List[tuple] = []
     upserts: List[Dict[str, Any]] = []
 
@@ -410,7 +428,7 @@ def main():
                 print("XLSX skipped (install pandas+openpyxl to enable)")
 
     print(f"\nAPI raw orders : {total_raw}")
-    print(f"In-month rows  : {len(upserts)}")
+    print(f"Upsert rows    : {len(upserts)}")
 
     # Upsert
     upsert_rows_resilient(SUPABASE_ORDERS_TABLE, upserts, SUPABASE_ON_CONFLICT, SUPABASE_BATCH_SIZE)

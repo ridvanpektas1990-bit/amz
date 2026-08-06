@@ -1,7 +1,7 @@
 name: Order Items Report (nightly)
 
 # Recurring flat-file report → amazon_order_items (FBA + FBM).
-# Runs after SaaS Orders nightly (02:12 UTC).
+# Runs after SaaS Orders nightly (02:12 UTC). Default lookback: 7 days.
 
 on:
   schedule:
@@ -19,7 +19,7 @@ on:
       lookback_days:
         description: "Lookback in Tagen (1..30)"
         required: false
-        default: "14"
+        default: "7"
 
 permissions:
   contents: read
@@ -105,7 +105,7 @@ jobs:
           LWA_CLIENT_SECRET: ${{ secrets.LWA_CLIENT_SECRET }}
           TENANT_ID: ${{ matrix.tenant }}
           MARKETPLACE: ${{ github.event.inputs.marketplace || 'DE' }}
-          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '14' }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
           LOCAL_TZ: ${{ vars.LOCAL_TZ || 'Europe/Berlin' }}
           SUPABASE_BATCH_SIZE: ${{ vars.SUPABASE_BATCH_SIZE || '300' }}
         run: python Python/libs/orders/AmzT_OrderItems_Report.py

@@ -1,0 +1,63 @@
+name: SaaS ETL (weekly month catch-up)
+
+# Einmal pro Woche: Vormonat vollständig nachziehen (Orders only).
+# Nightly deckt nur rolling 7 Tage ab.
+
+on:
+  schedule:
+    # Montags 04:20 UTC
+    - cron: "20 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      period_year:
+        description: "YYYY (leer = Vormonat)"
+        required: false
+        default: ""
+      period_month:
+        description: "M oder MM (leer = Vormonat)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      year: ${{ steps.p.outputs.year }}
+      month: ${{ steps.p.outputs.month }}
+    steps:
+      - id: p
+        shell: bash
+        env:
+          IN_Y: ${{ github.event.inputs.period_year }}
+          IN_M: ${{ github.event.inputs.period_month }}
+        run: |
+          if [ -n "${IN_Y}" ] && [ -n "${IN_M}" ]; then
+            echo "year=${IN_Y}" >> "$GITHUB_OUTPUT"
+            echo "month=${IN_M}" >> "$GITHUB_OUTPUT"
+          else
+            year="$(date -u +%Y)"
+            month="$(date -u +%-m)"
+            if [ "$month" -eq 1 ]; then
+              echo "year=$((year - 1))" >> "$GITHUB_OUTPUT"
+              echo "month=12" >> "$GITHUB_OUTPUT"
+            else
+              echo "year=$year" >> "$GITHUB_OUTPUT"
+              echo "month=$((month - 1))" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  etl-previous-month:
+    needs: prep
+    uses: ./.github/workflows/_saas-etl.yml
+    secrets: inherit
+    with:
+      period_year: ${{ needs.prep.outputs.year }}
+      period_month: ${{ needs.prep.outputs.month }}
+      tenants: ${{ vars.ACTIVE_TENANTS || 'ALL' }}
+      which: "orders"
+      max_parallel: "1"
+      lookback_days: "0"

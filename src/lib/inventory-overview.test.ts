@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   classifyStockStatus,
+  filterItemsBySelectedSku,
   inventoryActionHint,
   inventoryStatusLabel,
   selectOosRiskItems,
@@ -53,7 +54,7 @@ test("KPI summary aggregates sales, stock, risk and growth", () => {
   assert.equal(kpis.growthPercent, 0); // 200 vs 200
 });
 
-test("OOS risk list prioritizes out, then shortest cover, then sales", () => {
+test("OOS risk list includes only out/critical, prioritized by cover then sales", () => {
   const ranked = selectOosRiskItems([
     item({ sku: "warn", status: "warning", daysOfCover: 40, units30: 100 }),
     item({ sku: "crit-slow", status: "critical", daysOfCover: 20, units30: 5 }),
@@ -63,8 +64,22 @@ test("OOS risk list prioritizes out, then shortest cover, then sales", () => {
   ]);
   assert.deepEqual(
     ranked.map((row) => row.sku),
-    ["out", "crit-fast", "crit-slow", "warn"],
+    ["out", "crit-fast", "crit-slow"],
   );
+});
+
+test("filterItemsBySelectedSku scopes KPIs to the ASIN of the chosen SKU", () => {
+  const items = [
+    item({ sku: "A1", asin: "ASIN-X", status: "healthy", units30: 10, available: 5 }),
+    item({ sku: "A2", asin: "ASIN-X", status: "critical", units30: 20, available: 2, daysOfCover: 10 }),
+    item({ sku: "B1", asin: "ASIN-Y", status: "out", units30: 50, available: 0 }),
+  ];
+  const scoped = filterItemsBySelectedSku(items, "A1");
+  assert.deepEqual(
+    scoped.map((row) => row.sku).sort(),
+    ["A1", "A2"],
+  );
+  assert.equal(summarizeInventoryKpis(scoped).units30, 30);
 });
 
 test("action hints are actionable for OOS and short cover", () => {

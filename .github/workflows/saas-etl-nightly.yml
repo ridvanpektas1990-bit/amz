@@ -1,62 +1,41 @@
 name: SaaS ETL (nightly)
 
 on:
-  # Täglich um 02:12 UTC — nur Orders (keine Fees).
+  # Täglich um 02:12 UTC — Orders rolling 7 Tage (keine Fees, kein Monats-Vollscan).
   schedule:
     - cron: "12 2 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Orders Lookback in Tagen (1..30)"
+        required: false
+        default: "7"
 
 permissions:
   contents: read
   actions: write
 
 jobs:
-  # Ermittelt aktuelles Jahr/Monat (M0) und Vormonat (M-1)
   prep-now:
     runs-on: ubuntu-latest
     outputs:
       year: ${{ steps.now.outputs.year }}
       month: ${{ steps.now.outputs.month }}
-      prev_year: ${{ steps.now.outputs.prev_year }}
-      prev_month: ${{ steps.now.outputs.prev_month }}
     steps:
       - id: now
         shell: bash
         run: |
-          year="$(date -u +%Y)"
-          month="$(date -u +%-m)"
-          if [ "$month" -eq 1 ]; then
-            prev_year="$((year - 1))"
-            prev_month="12"
-          else
-            prev_year="$year"
-            prev_month="$((month - 1))"
-          fi
-          echo "year=$year" >> "$GITHUB_OUTPUT"
-          echo "month=$month" >> "$GITHUB_OUTPUT"
-          echo "prev_year=$prev_year" >> "$GITHUB_OUTPUT"
-          echo "prev_month=$prev_month" >> "$GITHUB_OUTPUT"
+          echo "year=$(date -u +%Y)" >> "$GITHUB_OUTPUT"
+          echo "month=$(date -u +%-m)" >> "$GITHUB_OUTPUT"
 
-  # M0: aktueller Monat — Orders only (Logistik)
-  etl-current-month:
+  etl-rolling:
     needs: prep-now
     uses: ./.github/workflows/_saas-etl.yml
     secrets: inherit
     with:
-      period_year:  ${{ needs.prep-now.outputs.year }}
+      period_year: ${{ needs.prep-now.outputs.year }}
       period_month: ${{ needs.prep-now.outputs.month }}
       tenants: ${{ vars.ACTIVE_TENANTS || 'ALL' }}
       which: "orders"
-      max_parallel: 1
-
-  # M-1: Vormonat erneut (schließt Order-Lücken)
-  etl-previous-month:
-    needs: [prep-now, etl-current-month]
-    uses: ./.github/workflows/_saas-etl.yml
-    secrets: inherit
-    with:
-      period_year:  ${{ needs.prep-now.outputs.prev_year }}
-      period_month: ${{ needs.prep-now.outputs.prev_month }}
-      tenants: ${{ vars.ACTIVE_TENANTS || 'ALL' }}
-      which: "orders"
-      max_parallel: 1
+      max_parallel: "1"
+      lookback_days: ${{ github.event.inputs.lookback_days || '7' }}

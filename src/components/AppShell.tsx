@@ -8,6 +8,7 @@ const NAV = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/nachbestellung", label: "Nachbestellung" },
   { href: "/sku-stammdaten", label: "SKU-Stammdaten" },
+  { href: "/monitoring", label: "Monitoring" },
 ] as const;
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
@@ -54,7 +55,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             })}
           </nav>
           <div className="border-t border-slate-200 px-4 py-3 text-[11px] text-slate-500">
-            Bestand · Nachschub · Stammdaten
+            Bestand · Nachschub · Monitoring
           </div>
         </aside>
 
