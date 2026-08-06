@@ -29,6 +29,14 @@ export type CartonSpecRow = CartonSpec & {
   available: number;
   inbound: number;
   hasSpec: boolean;
+  /** Local / 3PL warehouse units (not Amazon). */
+  localQty: number;
+  /** Units already ordered at supplier, not yet in local warehouse. */
+  onOrderUnits: number;
+  /** Days local warehouse → Amazon. */
+  transferLeadDays: number;
+  /** Date open supplier PO was placed (YYYY-MM-DD). */
+  onOrderOrderedAt: string | null;
 };
 
 /** Convert calendar days to whole weeks (ceil). Used when weekly forecast needs weeks. */
@@ -117,6 +125,21 @@ export function roundUpToCartons(rawQty: number, unitsPerCarton: number | null |
   };
 }
 
+export type SupplierMessageLang = "de" | "en";
+
+function formatCartonDimsCm(
+  lenCm?: number | null,
+  wCm?: number | null,
+  hCm?: number | null,
+): string | null {
+  const len = Number(lenCm);
+  const w = Number(wCm);
+  const h = Number(hCm);
+  if (!(len > 0) || !(w > 0) || !(h > 0)) return null;
+  const fmt = (n: number) => (Number.isInteger(n) ? String(n) : String(n));
+  return `${fmt(len)}x${fmt(w)}x${fmt(h)}cm`;
+}
+
 export function buildSupplierOrderMessage({
   productName,
   sku,
@@ -124,8 +147,10 @@ export function buildSupplierOrderMessage({
   orderQty,
   cartons,
   unitsPerCarton,
-  productionDays,
-  shippingDays,
+  cartonLenCm,
+  cartonWCm,
+  cartonHCm,
+  lang = "de",
 }: {
   productName?: string | null;
   sku: string;
@@ -133,26 +158,56 @@ export function buildSupplierOrderMessage({
   orderQty: number;
   cartons?: number | null;
   unitsPerCarton?: number | null;
-  productionDays?: number | null;
-  shippingDays?: number | null;
+  cartonLenCm?: number | null;
+  cartonWCm?: number | null;
+  cartonHCm?: number | null;
+  lang?: SupplierMessageLang;
 }): string {
   const title = (productName || sku).trim();
+  const en = lang === "en";
+  const dims = formatCartonDimsCm(cartonLenCm, cartonWCm, cartonHCm);
+  const upc = Math.max(0, Math.floor(Number(unitsPerCarton) || 0));
+  const cartonCount = Math.max(0, Math.floor(Number(cartons) || 0));
+  // Prefer carton count for the "Kartons:" line; fall back to order qty.
+  const cartonLineQty = cartonCount > 0 ? cartonCount : orderQty;
+
   const lines = [
-    `Bestellung / Purchase Order`,
-    ``,
-    `Produkt: ${title}`,
+    en ? "New Purchase Order" : "Neue Bestellung",
+    "",
+    en ? `Product: ${title}` : `Produkt: ${title}`,
     `SKU: ${sku}`,
   ];
   if (asin) lines.push(`ASIN: ${asin}`);
-  lines.push(`Menge: ${orderQty} Stück`);
-  if (cartons && unitsPerCarton) {
-    lines.push(`Kartons: ${cartons} × ${unitsPerCarton} Stück`);
+
+  if (dims) {
+    lines.push(
+      en
+        ? `Cartons: ${cartonLineQty} (${dims})`
+        : `Kartons: ${cartonLineQty} Stück (${dims})`,
+    );
+  } else {
+    lines.push(en ? `Cartons: ${cartonLineQty}` : `Kartons: ${cartonLineQty} Stück`);
   }
-  const leadDays =
-    Math.max(0, Number(productionDays) || 0) + Math.max(0, Number(shippingDays) || 0);
-  if (leadDays > 0) {
-    lines.push(`Erwartete Lead Time: ca. ${leadDays} Tage (Produktion + Versand)`);
+
+  if (upc > 0) {
+    lines.push(
+      en
+        ? `Units per carton: ${upc} units`
+        : `Stückzahl pro Karton: ${upc} Stück`,
+    );
   }
-  lines.push(``, `Bitte um Auftragsbestätigung und voraussichtliches Versanddatum.`);
+
+  lines.push(
+    en
+      ? `Total products: ${orderQty} units`
+      : `Anzahl Produkte insgesamt: ${orderQty} Stück`,
+  );
+
+  lines.push(
+    "",
+    en
+      ? "Please confirm the order and the expected ship date."
+      : "Bitte um Auftragsbestätigung und voraussichtliches Versanddatum.",
+  );
   return lines.join("\n");
 }

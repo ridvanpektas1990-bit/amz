@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Bar,
@@ -28,11 +28,20 @@ import {
   roundUpToCartons,
   type CartonSpecRow,
 } from "@/lib/carton-specs";
+import {
+  classifyLocalStockAction,
+  DEFAULT_TRANSFER_LEAD_DAYS,
+  onOrderArrivalDelayDays,
+  openOrderCoverDays,
+  supplierDeliveryGap,
+  supplierOrderQtyAfterPipeline,
+} from "@/lib/local-stock";
+import { actionLabel } from "@/lib/reorder-board";
 import { sortByDailySalesDesc } from "@/lib/listing-activity";
 import Link from "next/link";
 import {
+  chartWeekFromOosDate,
   planArrivalShipmentReorder,
-  projectWeeklyOos,
 } from "@/lib/inventory-forecast";
 
 /* ===== Types ===== */
@@ -176,19 +185,31 @@ function YearTooltip({ active, payload, year, prevYearWeekTotals, events }: any)
   );
 }
 
-// Label rechts neben einer vertikalen ReferenceLine
-function RLRightLabel(props: any) {
-  const { viewBox, value, fill = "#dc2626", dx = 8, dy = 12, fontSize = 10 } = props || {};
-  const x = (viewBox?.x ?? 0) + dx;
-  const y = (viewBox?.y ?? 0) + dy;
+
+
+/* ===== Einzeljahres-Chart ===== */
+const CHART_LABEL_STEP = -12;
+/** Weeks this close share the top-label lane and get stacked. */
+const CHART_LABEL_NEAR_WEEKS = 1;
+
+function ChartTopLabel(props: any) {
+  const { viewBox, value = "", fill = "#111827", dy = 0 } = props || {};
+  const x = viewBox?.x ?? 0;
+  const y = (viewBox?.y ?? 0) - 8 + dy;
   return (
-    <text x={x} y={y} textAnchor="start" dominantBaseline="middle" fontSize={fontSize} fill={fill}>
+    <text
+      x={x}
+      y={y}
+      textAnchor="middle"
+      dominantBaseline="auto"
+      fontSize={10}
+      fill={fill}
+    >
       {value}
     </text>
   );
 }
 
-/* ===== Einzeljahres-Chart ===== */
 function YearChart({
   data,
   year,
@@ -200,8 +221,9 @@ function YearChart({
   inventoryLeft,
   inventoryOnHand,
   inventoryInbound = 0,
-  recent30Units,
-  recentTempoDays = 14,
+  /** Same daily LY OOS dates as the cards (overview). */
+  oosDateAmazonISO = null,
+  oosDateGesamtISO = null,
 }: {
   data: Point[];
   year: number;
@@ -213,8 +235,8 @@ function YearChart({
   inventoryLeft?: number | null;
   inventoryOnHand?: number | null;
   inventoryInbound?: number;
-  recent30Units?: number;
-  recentTempoDays?: number;
+  oosDateAmazonISO?: string | null;
+  oosDateGesamtISO?: string | null;
 }) {
   const eventsByWeek = useMemo(() => {
     const m = new Map<number, { name: string; dateISO: string }[]>();
@@ -293,58 +315,105 @@ function YearChart({
     return "#82ca9d";
   };
 
-  // 2025 Wochen (für OOS)
-  const currentYearWeekTotals = useMemo(() => {
-    const m = new Map<number, number>();
-    if (year === currentIso?.year) {
-      data.forEach((p) => m.set(p.isoWeek, p.total || 0));
+  // OOS-Linien aus denselben Tages-Daten wie die Cards (overview), nicht Wochen-Walk
+  const oosLines = useMemo(() => {
+    const lines: Array<{
+      key: "amazon" | "gesamt";
+      weekKw: number;
+      stroke: string;
+      code: string;
+      name: string;
+      dateISO: string;
+    }> = [];
+
+    if (year !== currentIso?.year) return lines;
+
+    const amzDate = oosDateAmazonISO?.slice(0, 10) || null;
+    const gesamtDate = oosDateGesamtISO?.slice(0, 10) || null;
+    const amzKw = chartWeekFromOosDate(amzDate, year);
+    const gesamtKw = chartWeekFromOosDate(gesamtDate, year);
+    const sameDate = Boolean(amzDate && gesamtDate && amzDate === gesamtDate);
+
+    // Gleiches OOS-Datum → nur rote OOS2; sonst beide (wenn vorhanden)
+    if (!sameDate && amzKw != null && amzDate) {
+      lines.push({
+        key: "amazon",
+        weekKw: amzKw,
+        stroke: "#ea580c",
+        code: "OOS1",
+        name: "Amazon Lager",
+        dateISO: amzDate,
+      });
     }
-    return m;
-  }, [data, year, currentIso]);
+    if (gesamtKw != null && gesamtDate) {
+      lines.push({
+        key: "gesamt",
+        weekKw: gesamtKw,
+        stroke: "#dc2626",
+        code: "OOS2",
+        name: "Gesamtlager",
+        dateISO: gesamtDate,
+      });
+    } else if (lines.length === 0 && amzKw != null && amzDate) {
+      lines.push({
+        key: "amazon",
+        weekKw: amzKw,
+        stroke: "#ea580c",
+        code: "OOS1",
+        name: "Amazon Lager",
+        dateISO: amzDate,
+      });
+    }
+    return lines;
+  }, [year, currentIso, oosDateAmazonISO, oosDateGesamtISO]);
 
-  // --- OOS-Schätzung (shared forecast lib) ---
-  const oosForecast = useMemo(() => {
-    if (year !== currentIso?.year) return null;
-    if (!currentIso) return null;
-    if (inventoryLeft == null) return null;
+  /**
+   * Stack top labels when weeks are close:
+   * - Events stay at base
+   * - Heute moves up if near an event
+   * - OOS always moves up if near anything (OOS2 above OOS1)
+   */
+  const chartLabelDy = useMemo(() => {
+    const dy = new Map<string, number>();
+    type Placed = { key: string; week: number; level: number };
+    const placed: Placed[] = [];
+    const near = (week: number) =>
+      placed.filter((p) => Math.abs(p.week - week) <= CHART_LABEL_NEAR_WEEKS);
 
-    return projectWeeklyOos({
-      inventory: inventoryLeft,
-      currentWeek: currentIso.week,
-      previousYearWeekTotals: prevYearWeekTotals || null,
-      currentYearWeekTotals,
-      recent30Units,
-      recentTempoDays,
-    });
-  }, [year, currentIso, inventoryLeft, prevYearWeekTotals, currentYearWeekTotals, recent30Units, recentTempoDays]);
+    for (const [i, f] of (events?.futureLines || []).entries()) {
+      const key = `event-${f.week}-${i}`;
+      placed.push({ key, week: f.week, level: 0 });
+      dy.set(key, 0);
+    }
 
-  const oosTextAndColor = useMemo(() => {
-    if (year !== currentIso?.year || !sku || inventoryLeft == null) return null;
-    if (!oosForecast) return null;
-    const { weeks, weekKw } = oosForecast;
-    if (weeks === 0) return { text: "Jetzt ausverkauft", cls: "text-red-600" };
-    if (weeks === -1) return { text: "Bestand reicht > 1 Jahr", cls: "text-green-600" };
-    const cls = weeks <= 4 ? "text-red-600" : weeks <= 8 ? "text-yellow-600" : "text-green-600";
-    const kwPart = weekKw ? ` (KW ${weekKw})` : "";
-    return { text: `Voraussichtlich leer in ${weeks} ${weeks === 1 ? "Woche" : "Wochen"}${kwPart}`, cls };
-  }, [oosForecast, year, currentIso, sku, inventoryLeft]);
+    if (currentIso && currentIso.year === year) {
+      const nearby = near(currentIso.week);
+      const level = nearby.some((p) => p.key.startsWith("event-"))
+        ? Math.max(...nearby.map((p) => p.level)) + 1
+        : 0;
+      placed.push({ key: "heute", week: currentIso.week, level });
+      dy.set("heute", level * CHART_LABEL_STEP);
+    }
 
-  /* === Hover-Hotspot + SVG-Tooltip für OOS === */
-  const [oosTipVisible, setOosTipVisible] = useState(false);
+    // OOS1 first, then OOS2 → OOS2 stacks higher when both collide
+    for (const line of oosLines) {
+      const key = `oos-${line.key}`;
+      const nearby = near(line.weekKw);
+      const level = nearby.length ? Math.max(...nearby.map((p) => p.level)) + 1 : 0;
+      placed.push({ key, week: line.weekKw, level });
+      dy.set(key, level * CHART_LABEL_STEP);
+    }
 
-  const oosLabel = useMemo(
-    () => (oosForecast?.weekKw ? labelByWeek.get(oosForecast.weekKw) ?? null : null),
-    [oosForecast, labelByWeek]
-  );
+    return dy;
+  }, [events?.futureLines, currentIso, year, oosLines]);
 
-  const oosHoverLines: string[] = useMemo(() => {
-    if (!oosForecast?.weekKw) return [];
-    return [
-      `Basierend auf aktuellen Sales-Daten wirst du`,
-      `in KW ${oosForecast.weekKw} ausverkauft sein,`,
-      `wenn keine Nachbestellung erfolgt.`,
-    ];
-  }, [oosForecast]);
+  const chartTopMargin = useMemo(() => {
+    const levels = [...chartLabelDy.values()].map((v) => Math.abs(v / CHART_LABEL_STEP));
+    const maxLevel = levels.length ? Math.max(0, ...levels) : 0;
+    return Math.max(32, 28 + maxLevel * 12);
+  }, [chartLabelDy]);
+
+  const [oosTipKey, setOosTipKey] = useState<"amazon" | "gesamt" | null>(null);
 
   return (
     <section className="mb-4">
@@ -373,10 +442,18 @@ function YearChart({
           )}
         </div>
 
-        {/* MITTE: Titel */}
-        <h2 className="justify-self-center text-lg font-semibold">
-          {year}{sku ? ` · ${sku}` : ""}
-        </h2>
+        {/* MITTE: Titel + Legende */}
+        <div className="justify-self-center text-center">
+          <h2 className="text-lg font-semibold">
+            {year}{sku ? ` · ${sku}` : ""}
+          </h2>
+          {year === currentIso?.year && sku && typeof inventoryLeft === "number" && (
+            <div className="mt-0.5 flex flex-wrap items-center justify-center gap-x-3 gap-y-0.5 text-[11px] leading-tight">
+              <span className="font-medium text-orange-600">OOS1: Amazon Lager</span>
+              <span className="font-medium text-red-600">OOS2: Gesamtlager</span>
+            </div>
+          )}
+        </div>
 
         {/* RECHTS: Lager/OOS (inkl. Inbound) */}
         {year === currentIso?.year && sku && typeof inventoryLeft === "number" && (
@@ -393,11 +470,6 @@ function YearChart({
                 {nf.format(inventoryOnHand)} verfügbar · +{nf.format(inventoryInbound)} Inbound
               </div>
             )}
-            {oosTextAndColor && (
-              <div className={`mt-1 text-sm font-medium ${oosTextAndColor.cls}`}>
-                {oosTextAndColor.text}
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -408,7 +480,7 @@ function YearChart({
           <BarChart
             data={data}
             syncId="kw-sync"
-            margin={{ top: 28, right: 16, left: 16, bottom: 8 }}
+            margin={{ top: chartTopMargin, right: 16, left: 16, bottom: 8 }}
             barCategoryGap={2}
             barSize={10}
           >
@@ -469,122 +541,145 @@ function YearChart({
                       stroke="#16a34a"
                       strokeWidth={2}
                       strokeDasharray="3 3"
-                      label={{ value: "Heute", position: "top", fontSize: 10, fill: "#16a34a" }}
+                      label={
+                        <ChartTopLabel
+                          value="Heute"
+                          fill="#16a34a"
+                          dy={chartLabelDy.get("heute") ?? 0}
+                        />
+                      }
                     />
                   );
                 })()
               : null}
 
-            {/* OOS-Linie des aktuellen Jahres + Hover-Hotspot & SVG-Tooltip */}
-            {year === currentIso?.year && oosForecast?.weekKw
-              ? (() => {
-                  const oosKW = oosForecast.weekKw!;
-                  const xLabel = labelByWeek.get(oosKW);
-                  if (!xLabel) return null;
+            {/* OOS-Linien: kleines „OOS“-Label, Name per Hover */}
+            {year === currentIso?.year &&
+              oosLines.map((line) => {
+                const xLabel = labelByWeek.get(line.weekKw);
+                if (!xLabel) return null;
+                const tipOpen = oosTipKey === line.key;
 
-                  return (
-                    <>
-                      <ReferenceLine
-                        x={xLabel}
-                        xAxisId={0}
-                        ifOverflow="extendDomain"
-                        stroke="#dc2626"
-                        strokeWidth={2}
-                        strokeDasharray="2 2"
-                        label={<RLRightLabel value={`KW ${oosKW} OOS`} fill="#dc2626" dx={8} dy={12} fontSize={10} />}
-                      />
-                      {/* Hotzone + Tooltip als SVG über Customized */}
-                      <Customized
-                        key="oos-hotspot"
-                        component={(props: any) => {
-                          const axisMap = props?.xAxisMap || {};
-                          const axis = (Object.values(axisMap) as any[])[0];
-                          if (!axis || !axis.scale) return null;
+                return (
+                  <Fragment key={`oos-${line.key}-${line.weekKw}`}>
+                    <ReferenceLine
+                      x={xLabel}
+                      xAxisId={0}
+                      ifOverflow="extendDomain"
+                      stroke={line.stroke}
+                      strokeWidth={2}
+                      strokeDasharray="2 2"
+                      label={
+                        <ChartTopLabel
+                          value={line.code}
+                          fill={line.stroke}
+                          dy={chartLabelDy.get(`oos-${line.key}`) ?? 0}
+                        />
+                      }
+                    />
+                    <Customized
+                      key={`oos-hotspot-${line.key}`}
+                      component={(props: any) => {
+                        const axisMap = props?.xAxisMap || {};
+                        const axis = (Object.values(axisMap) as any[])[0];
+                        if (!axis || !axis.scale) return null;
 
-                          // x-Koordinate der OOS-Kategorie bestimmen
-                          const xLocal = axis.scale(xLabel); // relative zum Plotbereich
-                          if (typeof xLocal !== "number") return null;
+                        const xLocal = axis.scale(xLabel);
+                        if (typeof xLocal !== "number") return null;
 
-                          const left = props?.offset?.left ?? 0;
-                          const top = props?.offset?.top ?? 0;
-                          const bottom = props?.offset?.bottom ?? 0;
-                          const height = props?.height ?? 0;
-                          const plotHeight = height - top - bottom;
+                        const left = props?.offset?.left ?? 0;
+                        const top = props?.offset?.top ?? 0;
+                        const bottom = props?.offset?.bottom ?? 0;
+                        const height = props?.height ?? 0;
+                        const plotHeight = height - top - bottom;
+                        const x = left + xLocal;
+                        const tooltipW = 150;
+                        const tooltipH = 40;
+                        const dateLabel = new Intl.DateTimeFormat("de-DE", {
+                          day: "2-digit",
+                          month: "2-digit",
+                          year: "numeric",
+                        }).format(new Date(`${line.dateISO}T12:00:00Z`));
 
-                          const x = left + xLocal;
-
-                          const tooltipW = 280;
-                          const tooltipH = 48;
-
-                          return (
-                            <g>
-                              {/* Hotzone: breiter, transparenter Streifen, damit Hover sicher triggert */}
-                              <rect
-                                x={x - 10}
-                                y={top}
-                                width={20}
-                                height={plotHeight}
-                                fill="transparent"
-                                onMouseEnter={() => setOosTipVisible(true)}
-                                onMouseLeave={() => setOosTipVisible(false)}
-                                style={{ cursor: "help" }}
-                              />
-
-                              {/* Tooltip als SVG-Overlay */}
-                              {oosTipVisible && (
-                                <g pointerEvents="none">
-                                  <rect
-                                    x={Math.min(x + 10, (props?.width ?? 0) - tooltipW - 4)}
-                                    y={top + 6}
-                                    width={tooltipW}
-                                    height={tooltipH}
-                                    rx={6}
-                                    ry={6}
-                                    fill="white"
-                                    stroke="#ddd"
-                                    opacity={0.98}
-                                  />
-                                  <text
+                        return (
+                          <g>
+                            <rect
+                              x={x - 10}
+                              y={top}
+                              width={20}
+                              height={plotHeight}
+                              fill="transparent"
+                              onMouseEnter={() => setOosTipKey(line.key)}
+                              onMouseLeave={() => setOosTipKey(null)}
+                              style={{ cursor: "help" }}
+                            />
+                            {tipOpen && (
+                              <g pointerEvents="none">
+                                <rect
+                                  x={Math.min(x + 10, (props?.width ?? 0) - tooltipW - 4)}
+                                  y={top + 6}
+                                  width={tooltipW}
+                                  height={tooltipH}
+                                  rx={6}
+                                  ry={6}
+                                  fill="white"
+                                  stroke={line.stroke}
+                                  opacity={0.98}
+                                />
+                                <text
+                                  x={Math.min(x + 18, (props?.width ?? 0) - tooltipW + 4)}
+                                  y={top + 22}
+                                  fontSize={12}
+                                  fontWeight={600}
+                                  fill={line.stroke}
+                                >
+                                  <tspan
                                     x={Math.min(x + 18, (props?.width ?? 0) - tooltipW + 4)}
-                                    y={top + 22}
-                                    fontSize={12}
-                                    fill="#111827"
+                                    dy={0}
                                   >
-                                    <tspan x={Math.min(x + 18, (props?.width ?? 0) - tooltipW + 4)} dy={0}>
-                                      {oosHoverLines[0] ?? ""}
-                                    </tspan>
-                                    <tspan x={Math.min(x + 18, (props?.width ?? 0) - tooltipW + 4)} dy={16}>
-                                      {oosHoverLines[1] ?? ""}
-                                    </tspan>
-                                    <tspan x={Math.min(x + 18, (props?.width ?? 0) - tooltipW + 4)} dy={16}>
-                                      {oosHoverLines[2] ?? ""}
-                                    </tspan>
-                                  </text>
-                                </g>
-                              )}
-                            </g>
-                          );
-                        }}
-                      />
-                    </>
-                  );
-                })()
-              : null}
+                                    {line.name}
+                                  </tspan>
+                                  <tspan
+                                    x={Math.min(x + 18, (props?.width ?? 0) - tooltipW + 4)}
+                                    dy={14}
+                                    fontSize={11}
+                                    fontWeight={500}
+                                    fill="#475569"
+                                  >
+                                    ca. {dateLabel}
+                                  </tspan>
+                                </text>
+                              </g>
+                            )}
+                          </g>
+                        );
+                      }}
+                    />
+                  </Fragment>
+                );
+              })}
 
             {/* Zukünftige Events */}
             {(events?.futureLines || []).map((f, i) => {
               const xLabel = labelByWeek.get(f.week);
               if (!xLabel) return null;
+              const eventKey = `event-${f.week}-${i}`;
               return (
                 <ReferenceLine
-                  key={`${f.week}-${i}`}
+                  key={eventKey}
                   x={xLabel}
                   xAxisId={0}
                   ifOverflow="extendDomain"
                   stroke="#3809a7ff"
                   strokeWidth={2}
                   strokeDasharray="4 2"
-                  label={{ value: f.name, position: "top", fontSize: 10, fill: "#3809a7ff" }}
+                  label={
+                    <ChartTopLabel
+                      value={f.name}
+                      fill="#3809a7ff"
+                      dy={chartLabelDy.get(eventKey) ?? 0}
+                    />
+                  }
                 />
               );
             })}
@@ -846,6 +941,8 @@ export default function DashboardPage() {
   const [currentYearData, setCurrentYearData] = useState<Point[] | null>(null);
   const [previousYearData, setPreviousYearData] = useState<Point[] | null>(null);
   const [olderYearData, setOlderYearData] = useState<Point[] | null>(null);
+  /** SKU the loaded week maps belong to ("" = all SKUs). Prevents cross-SKU reorder math. */
+  const [chartDataSku, setChartDataSku] = useState<string | null>(null);
   const [currentRecent30Units, setCurrentRecent30Units] = useState(0);
   const [currentRecentTempoDays, setCurrentRecentTempoDays] = useState(14);
   const [orderItemsSyncKey, setOrderItemsSyncKey] = useState(0);
@@ -864,6 +961,15 @@ export default function DashboardPage() {
   const [showOlderYearChart, setShowOlderYearChart] = useState(false);
   const [cartonSpec, setCartonSpec] = useState<CartonSpecRow | null>(null);
   const [reorderDetailsOpen, setReorderDetailsOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      const fromQuery = new URLSearchParams(window.location.search).get("sku")?.trim();
+      if (fromQuery) setSku(fromQuery);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     setReorderDetailsOpen(false);
@@ -948,9 +1054,16 @@ export default function DashboardPage() {
 
   // Jahresdaten laden
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       setLoading(true);
       setErr(null);
+      // Drop stale maps immediately so reorder cannot use another SKU's (or all-SKU) demand.
+      setCurrentYearData(null);
+      setPreviousYearData(null);
+      setOlderYearData(null);
+      setChartDataSku(null);
+      setCurrentRecent30Units(0);
       try {
         const qs = sku ? `&sku=${encodeURIComponent(sku)}` : "";
         const [currentResponse, previousResponse, olderResponse] = await Promise.all([
@@ -961,6 +1074,7 @@ export default function DashboardPage() {
         const currentJson = await currentResponse.json();
         const previousJson = await previousResponse.json();
         const olderJson = await olderResponse.json();
+        if (cancelled) return;
         if (!currentResponse.ok || !currentJson.ok) throw new Error(currentJson?.error || `Fehler ${currentYear}`);
         if (!previousResponse.ok || !previousJson.ok) throw new Error(previousJson?.error || `Fehler ${previousYear}`);
         if (!olderResponse.ok || !olderJson.ok) throw new Error(olderJson?.error || `Fehler ${olderYear}`);
@@ -971,12 +1085,16 @@ export default function DashboardPage() {
         );
         setPreviousYearData(previousJson.points as Point[]);
         setOlderYearData(olderJson.points as Point[]);
+        setChartDataSku(sku);
       } catch (e: any) {
-        setErr(e.message);
+        if (!cancelled) setErr(e.message);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [sku, currentYear, previousYear, olderYear, orderItemsSyncKey]);
 
   // Bei SKU: Order-Items nachladen (ohne Fee-Lag), danach Chart neu
@@ -1153,6 +1271,8 @@ export default function DashboardPage() {
   const reorderPlanTop = useMemo(() => {
     if (!sku || inventoryLeft == null || leadTimeDays == null) return null;
     if (!currentIso || !previousYearMap || !currentYearMap) return null;
+    // Only use week maps that were fetched for this exact SKU (never all-SKU totals).
+    if (chartDataSku !== sku) return null;
 
     return planArrivalShipmentReorder({
       inventory: inventoryLeft,
@@ -1167,6 +1287,7 @@ export default function DashboardPage() {
     });
   }, [
     sku,
+    chartDataSku,
     inventoryLeft,
     currentIso,
     previousYearMap,
@@ -1186,15 +1307,198 @@ export default function DashboardPage() {
     return Math.max(0, reorderPlanTop.weeksUntilOos * 7);
   }, [sku, inventory.data, reorderPlanTop]);
 
+  const overviewSku = useMemo(
+    () => inventory.data?.items.find((item) => item.sku === sku) || null,
+    [inventory.data, sku],
+  );
+
+  const localQty = overviewSku?.localQty ?? cartonSpec?.localQty ?? 0;
+  const onOrderUnits = overviewSku?.onOrderUnits ?? cartonSpec?.onOrderUnits ?? 0;
+  const transferLeadDays =
+    overviewSku?.transferLeadDays ?? cartonSpec?.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS;
+
+  const daysUntilOosPipeline = useMemo(() => {
+    if (!sku) return null;
+    const fromOverview = overviewSku?.daysOfCoverWithLocal;
+    if (typeof fromOverview === "number") return fromOverview;
+    return daysUntilOos;
+  }, [sku, overviewSku, daysUntilOos]);
+
+  const daysUntilOosAmazonAndLocal = useMemo(() => {
+    if (!sku) return null;
+    const fromOverview = overviewSku?.daysOfCoverAmazonAndLocal;
+    if (typeof fromOverview === "number") return fromOverview;
+    return daysUntilOos;
+  }, [sku, overviewSku, daysUntilOos]);
+
+  const onOrderOrderedAt =
+    overviewSku?.onOrderOrderedAt ?? cartonSpec?.onOrderOrderedAt ?? null;
+
   const cartonOrder = useMemo(() => {
     if (!reorderPlanTop) return null;
-    return roundUpToCartons(reorderPlanTop.reorderQty, cartonSpec?.unitsPerCarton ?? null);
-  }, [reorderPlanTop, cartonSpec]);
+    const adjusted = supplierOrderQtyAfterPipeline({
+      rawChargeQty: reorderPlanTop.reorderQty,
+      onOrderUnits,
+    });
+    return roundUpToCartons(adjusted, cartonSpec?.unitsPerCarton ?? null);
+  }, [reorderPlanTop, cartonSpec, onOrderUnits]);
 
   const reorderTiming = useMemo(() => {
     if (leadTimeDays == null) return null;
-    return classifyReorderTiming(daysUntilOos, leadTimeDays);
-  }, [daysUntilOos, leadTimeDays]);
+    // Same horizon as Lieferverzug Bestellfrist (Amazon + Eigenlager).
+    return classifyReorderTiming(daysUntilOosAmazonAndLocal, leadTimeDays);
+  }, [daysUntilOosAmazonAndLocal, leadTimeDays]);
+
+  const stockAction = useMemo(() => {
+    if (leadTimeDays == null) return null;
+    return classifyLocalStockAction({
+      amazonDaysOfCover: daysUntilOos,
+      transferLeadDays,
+      localQty,
+      onOrderUnits,
+      supplierLeadDays: leadTimeDays,
+      dailyRate:
+        overviewSku?.forecastDailySales ||
+        overviewSku?.dailySales30 ||
+        (currentRecentTempoDays > 0 ? currentRecent30Units / currentRecentTempoDays : 0),
+      chargeCoverDays: reorderPlanTop?.coverDays ?? null,
+      amazonAndLocalDaysOfCover: daysUntilOosAmazonAndLocal,
+      pipelineDaysOfCover: daysUntilOosPipeline,
+      onOrderArrivesInDays: onOrderArrivalDelayDays({
+        orderedAtISO: onOrderUnits > 0 ? onOrderOrderedAt : null,
+        supplierLeadDays: leadTimeDays,
+      }),
+    });
+  }, [
+    leadTimeDays,
+    daysUntilOos,
+    transferLeadDays,
+    localQty,
+    onOrderUnits,
+    overviewSku,
+    currentRecent30Units,
+    currentRecentTempoDays,
+    reorderPlanTop?.coverDays,
+    daysUntilOosAmazonAndLocal,
+    daysUntilOosPipeline,
+    onOrderOrderedAt,
+  ]);
+
+  const dailyRateForCover = useMemo(() => {
+    return (
+      overviewSku?.forecastDailySales ||
+      overviewSku?.dailySales30 ||
+      (currentRecentTempoDays > 0 ? currentRecent30Units / currentRecentTempoDays : 0) ||
+      0
+    );
+  }, [overviewSku, currentRecent30Units, currentRecentTempoDays]);
+
+  const onOrderCoverDays = useMemo(
+    () => openOrderCoverDays(onOrderUnits, dailyRateForCover),
+    [onOrderUnits, dailyRateForCover],
+  );
+
+  /** Order qty even before chart LY maps are ready (same charge idea as board). */
+  const plannedSupplierOrderQty = useMemo(() => {
+    if (cartonOrder && cartonOrder.orderQty > 0) return cartonOrder.orderQty;
+    if (leadTimeDays == null || dailyRateForCover <= 0) return null;
+    const buffer = Math.max(0, Number(cartonSpec?.bufferTimeDays) || 0);
+    const coverDays = Math.max(1, leadTimeDays + buffer);
+    const raw = Math.max(0, Math.ceil(dailyRateForCover * coverDays));
+    const adjusted = supplierOrderQtyAfterPipeline({
+      rawChargeQty: raw,
+      onOrderUnits,
+    });
+    const rounded = roundUpToCartons(adjusted, cartonSpec?.unitsPerCarton ?? null);
+    return rounded.orderQty > 0 ? rounded.orderQty : null;
+  }, [cartonOrder, leadTimeDays, dailyRateForCover, cartonSpec, onOrderUnits]);
+
+  const deliveryGap = useMemo(() => {
+    if (leadTimeDays == null) return null;
+    const gap = supplierDeliveryGap({
+      oosDaysAmazonAndLocal: daysUntilOosAmazonAndLocal,
+      orderedAtISO: onOrderUnits > 0 ? onOrderOrderedAt : null,
+      supplierLeadDays: leadTimeDays,
+    });
+    if (!gap) return null;
+    // Same calendar date as chart OOS2 / overview (no re-derive drift)
+    const oosDateISO =
+      overviewSku?.estimatedOosDateAmazonAndLocal?.slice(0, 10) || gap.oosDateISO;
+    if (!oosDateISO || !gap.arrivalDateISO) {
+      return { ...gap, oosDateISO };
+    }
+    const oosMs = Date.parse(`${oosDateISO}T12:00:00Z`);
+    const arrivalMs = Date.parse(`${gap.arrivalDateISO}T12:00:00Z`);
+    if (!Number.isFinite(oosMs) || !Number.isFinite(arrivalMs)) {
+      return { ...gap, oosDateISO };
+    }
+    return {
+      ...gap,
+      oosDateISO,
+      gapDays: Math.round((arrivalMs - oosMs) / 86_400_000),
+    };
+  }, [
+    leadTimeDays,
+    daysUntilOosAmazonAndLocal,
+    onOrderUnits,
+    onOrderOrderedAt,
+    overviewSku?.estimatedOosDateAmazonAndLocal,
+  ]);
+
+  const deDate = (iso: string | null | undefined) => {
+    if (!iso) return "–";
+    return new Intl.DateTimeFormat("de-DE", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).format(new Date(`${iso.slice(0, 10)}T12:00:00Z`));
+  };
+
+  const inDaysLabel = (days: number) =>
+    days === 1 ? "in 1 Tag" : `in ${nfTop.format(Math.max(0, Math.round(days)))} Tagen`;
+
+  /** Same “Bestellfrist” number as Lieferverzug card. */
+  const daysUntilSupplierOrder = useMemo(() => {
+    if (onOrderUnits > 0 && deliveryGap?.hasOpenOrder) return null;
+    if (deliveryGap?.gapDays != null && !deliveryGap.hasOpenOrder) {
+      // gapDays = arrival − OOS; negative → days of buffer / Bestellfrist
+      return Math.round(-deliveryGap.gapDays);
+    }
+    if (reorderTiming?.daysUntilMustOrder != null) {
+      return Math.round(reorderTiming.daysUntilMustOrder);
+    }
+    return null;
+  }, [onOrderUnits, deliveryGap, reorderTiming]);
+
+  const eigenesLagerLabel = (() => {
+    if (localQty <= 0) return "Leer";
+    if (daysUntilOos == null) return "nicht nötig";
+    const daysLeft = Math.round(daysUntilOos) - Math.round(transferLeadDays);
+    if (daysLeft <= 0) return "Amazon nachfüllen";
+    return `${inDaysLabel(daysLeft)} schicken`;
+  })();
+
+  const lieferantLabel = (() => {
+    if (onOrderUnits > 0) {
+      return `${nfTop.format(onOrderUnits)} Stück bereits bestellt`;
+    }
+    const qty =
+      plannedSupplierOrderQty != null && plannedSupplierOrderQty > 0
+        ? nfTop.format(plannedSupplierOrderQty)
+        : null;
+    const daysLeft = daysUntilSupplierOrder;
+
+    if (daysLeft == null) {
+      if (qty) return `${qty} Stück bestellen`;
+      return "nicht nötig";
+    }
+    if (daysLeft <= 0) {
+      return qty ? `${qty} Stück jetzt bestellen` : "jetzt bestellen";
+    }
+    return qty
+      ? `${inDaysLabel(daysLeft)} ${qty} Stück bestellen`
+      : `${inDaysLabel(daysLeft)} bestellen`;
+  })();
 
   // Countdown events remain available for charts via event maps
   // (header text intentionally minimal)
@@ -1270,82 +1574,134 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {sku && leadTimeDays != null && reorderTiming && (
+          {sku && leadTimeDays != null && reorderTiming && stockAction && (
             <div
               id="nachbestellung"
               className="mt-3 scroll-mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm"
             >
               <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                Wann bestellen?{" "}
+                Wann handeln?{" "}
                 <span className="font-normal normal-case tracking-normal text-slate-400">
                   (Lieferzeit {leadTimeDays} Tage
                   {cartonSpec
                     ? `: ${cartonSpec.productionTimeDays || 0} Prod. + ${cartonSpec.shippingTimeDays || 0} Versand`
                     : ""}
+                  {localQty > 0 || onOrderUnits > 0
+                    ? ` · Transfer lokal ${transferLeadDays}T`
+                    : ""}
                   )
                 </span>
               </div>
 
-              {reorderTiming.status === "no_demand" && (
-                <div className="mt-1 text-lg font-semibold text-slate-950">Kein Verkaufstempo – OOS nicht berechenbar</div>
-              )}
-
-              {reorderTiming.status === "already_oos" && (
-                <div className="mt-1">
-                  <div className="text-lg font-semibold text-red-700">Bereits OOS</div>
+              <div className="mt-1">
+                <div
+                  className={`text-lg font-semibold ${
+                    stockAction === "order_supplier" &&
+                    (reorderTiming.status === "already_oos" || reorderTiming.status === "too_late")
+                      ? "text-red-700"
+                      : stockAction === "order_supplier"
+                        ? "text-amber-800"
+                        : stockAction === "replenish_amazon"
+                          ? "text-sky-800"
+                          : stockAction === "awaiting_supplier"
+                            ? "text-violet-800"
+                            : "text-slate-950"
+                  }`}
+                >
+                  {actionLabel(stockAction)}
                 </div>
-              )}
-
-              {reorderTiming.status === "order_now" && (
-                <div className="mt-1">
-                  <div className="text-lg font-semibold text-amber-800">Jetzt bestellen</div>
+                {stockAction === "replenish_amazon" && (
                   <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    OOS in ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tagen – genau die Lieferzeit.
-                    Heute ist der letzte sinnvolle Bestelltag.
+                    Amazon-Cover ca. {daysUntilOos == null ? "–" : nfTop.format(daysUntilOos)} Tage,
+                    lokaler Bestand {nfTop.format(localQty)} Stück (Transfer {transferLeadDays} Tage).
+                    Kein neues Lieferanten-PO nötig – aus lokalem Lager nach Amazon schicken.
                   </p>
-                </div>
-              )}
-
-              {reorderTiming.status === "ok" && (
-                <div className="mt-1">
-                  <div className="text-lg font-semibold text-slate-950">
-                    Spätestens in {nfTop.format(reorderTiming.daysUntilMustOrder!)} Tagen bestellen
-                  </div>
+                )}
+                {stockAction === "awaiting_supplier" && (
                   <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    OOS voraussichtlich in {nfTop.format(reorderTiming.daysUntilOos!)} Tagen
+                    Offene Bestellung {nfTop.format(onOrderUnits)} Stück deckt die Lücke.
+                    Pipeline-Cover ca.{" "}
+                    {daysUntilOosPipeline == null ? "–" : `${nfTop.format(daysUntilOosPipeline)} Tage`}.
+                  </p>
+                )}
+                {stockAction === "order_supplier" && reorderTiming.status === "order_now" && (
+                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
+                    Pipeline-OOS in ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tagen – genau die Lieferzeit.
+                    Heute ist der letzte sinnvolle Bestelltag beim Lieferanten.
+                  </p>
+                )}
+                {stockAction === "order_supplier" && reorderTiming.status === "ok" && (
+                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
+                    Spätestens in {nfTop.format(reorderTiming.daysUntilMustOrder!)} Tagen beim Lieferanten
+                    bestellen. Pipeline-OOS in {nfTop.format(reorderTiming.daysUntilOos!)} Tagen
                     {reorderPlanTop?.oosWeek != null
                       ? ` (KW ${reorderPlanTop.oosWeek}/${reorderPlanTop.oosYear})`
                       : ""}
-                    . Bestellfrist = OOS minus Lieferzeit.
+                    .
                   </p>
-                </div>
-              )}
+                )}
+                {stockAction === "ok" && (
+                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
+                    Pipeline reicht voraussichtlich über die Lieferzeit.
+                  </p>
+                )}
+              </div>
 
               <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 text-sm sm:grid-cols-3">
                 <div className="rounded-lg border border-sky-100 bg-sky-50/80 px-3 py-2.5">
                   <div className="text-[11px] font-medium text-sky-700/80">Aktueller Stand</div>
                   <div className="mt-0.5 font-semibold text-sky-950">
-                    {reorderTiming.daysUntilOos === null
-                      ? "Kein Tempo"
-                      : reorderTiming.daysUntilOos === 0
-                        ? "Jetzt leer"
-                        : `Noch ca. ${nfTop.format(reorderTiming.daysUntilOos)} Tage`}
+                    {daysUntilOos === null
+                      ? "Kein Verkaufstempo"
+                      : daysUntilOos === 0
+                        ? "Amazon-Lager leer"
+                        : `Amazon-Reichweite ca. ${nfTop.format(daysUntilOos)} Tage`}
                   </div>
-                  <div className="mt-0.5 text-xs text-sky-800/70">
-                    {inventoryLeft != null ? `${nfTop.format(Math.round(inventoryLeft))} Stück` : "–"}
-                    {inventoryInbound > 0 ? ` inkl. +${nfTop.format(inventoryInbound)} Inbound` : ""}
+                  <div className="mt-1 space-y-1 text-xs leading-snug text-sky-900/75">
+                    <div>
+                      <span className="font-semibold tabular-nums text-sky-950">
+                        {inventoryLeft != null ? `${nfTop.format(Math.round(inventoryLeft))} Stück` : "–"}
+                      </span>
+                      <span className="text-sky-800/70">
+                        {" "}
+                        {inventoryInbound > 0
+                          ? "(Amazon-Lager + Zulauf unterwegs)"
+                          : "(Amazon-Lager)"}
+                      </span>
+                    </div>
+                    {localQty > 0 && (
+                      <div>
+                        <span className="font-semibold tabular-nums text-violet-900">
+                          {nfTop.format(localQty)} Stück
+                        </span>
+                        <span className="text-violet-800/75"> (Eigenes / externes Lager)</span>
+                      </div>
+                    )}
+                    {onOrderUnits > 0 && (
+                      <div>
+                        <span className="font-semibold tabular-nums text-violet-900">
+                          {nfTop.format(onOrderUnits)} Stück
+                        </span>
+                        <span className="text-violet-800/75">
+                          {" "}
+                          (beim Lieferanten bestellt
+                          {onOrderOrderedAt ? ` am ${deDate(onOrderOrderedAt)}` : ""}
+                          )
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div
                   className={`rounded-lg border px-3 py-2.5 ${
-                    reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
+                    deliveryGap?.gapDays != null && deliveryGap.gapDays > 0
                       ? "border-rose-100 bg-rose-50/80"
                       : "border-emerald-100 bg-emerald-50/80"
                   }`}
                 >
                   <div
                     className={`text-[11px] font-medium ${
-                      reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
+                      deliveryGap?.gapDays != null && deliveryGap.gapDays > 0
                         ? "text-rose-700/80"
                         : "text-emerald-700/80"
                     }`}
@@ -1354,27 +1710,47 @@ export default function DashboardPage() {
                   </div>
                   <div
                     className={`mt-0.5 font-semibold tabular-nums ${
-                      reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder < 0
+                      deliveryGap?.gapDays != null && deliveryGap.gapDays > 0
                         ? "text-rose-800"
                         : "text-emerald-950"
                     }`}
                   >
-                    {reorderTiming.daysUntilMustOrder == null
+                    {deliveryGap?.gapDays == null
                       ? "–"
-                      : reorderTiming.daysUntilMustOrder < 0
-                        ? `−${nfTop.format(Math.abs(reorderTiming.daysUntilMustOrder))} Tage`
-                        : reorderTiming.daysUntilMustOrder === 0
-                          ? "0 Tage"
-                          : "kein Verzug"}
+                      : deliveryGap.gapDays > 0
+                        ? `− ${nfTop.format(deliveryGap.gapDays)} Tage`
+                        : "kein Verzug"}
                   </div>
-                  {reorderTiming.daysUntilMustOrder != null && reorderTiming.daysUntilMustOrder > 0 && (
-                    <div className="mt-0.5 text-xs text-emerald-800/70">
-                      noch {nfTop.format(reorderTiming.daysUntilMustOrder)} Tage bis Bestellfrist
+                  {deliveryGap?.arrivalDateISO && deliveryGap?.oosDateISO && (
+                    <div
+                      className={`mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs leading-snug ${
+                        deliveryGap.gapDays != null && deliveryGap.gapDays > 0
+                          ? "text-rose-800/75"
+                          : "text-emerald-800/75"
+                      }`}
+                    >
+                      <span>Ankunft:</span>
+                      <span>
+                        ~ {deDate(deliveryGap.arrivalDateISO)}
+                        {!deliveryGap.hasOpenOrder ? " (falls heute bestellt)" : ""}
+                      </span>
+                      <span>OOS:</span>
+                      <span>~ {deDate(deliveryGap.oosDateISO)}</span>
                     </div>
                   )}
-                  {reorderTiming.daysUntilMustOrder === 0 && (
-                    <div className="mt-0.5 text-xs text-emerald-800/70">Bestellfrist ist heute</div>
+                  {deliveryGap?.gapDays != null && deliveryGap.gapDays > 0 && (
+                    <div className="mt-1.5 text-xs leading-snug text-rose-800/80">
+                      {nfTop.format(deliveryGap.gapDays)} Tage eventuell keine Sales, da die
+                      Lieferung nach OOS ankommt
+                    </div>
                   )}
+                  {deliveryGap?.gapDays != null &&
+                    deliveryGap.gapDays < 0 &&
+                    !deliveryGap.hasOpenOrder && (
+                      <div className="mt-1.5 text-xs leading-snug text-emerald-800/70">
+                        noch {nfTop.format(Math.abs(deliveryGap.gapDays))} Tage bis Bestellfrist
+                      </div>
+                    )}
                 </div>
                 <div className="relative rounded-lg border border-teal-100 bg-teal-50/80 px-3 py-2.5">
                   <div className="flex items-start justify-between gap-2">
@@ -1391,65 +1767,87 @@ export default function DashboardPage() {
                       </button>
                       {reorderDetailsOpen && (
                         <div className="absolute right-0 top-full z-40 mt-2 w-80 max-w-[min(20rem,calc(100vw-2rem))] space-y-2 rounded-xl border border-slate-200 bg-white p-3 text-left text-xs leading-relaxed text-slate-600 shadow-xl">
-                          <p className="font-semibold text-slate-800">Rechnung & Nachbestellmenge</p>
+                          <p className="font-semibold text-slate-800">Zwei getrennte Entscheidungen</p>
                           <p>
-                            <strong className="text-slate-800">Bestellfrist:</strong> Tage bis OOS − Lieferzeit ={" "}
-                            {reorderTiming.daysUntilOos == null
-                              ? "–"
-                              : `${reorderTiming.daysUntilOos} − ${leadTimeDays} = ${reorderTiming.daysUntilMustOrder}`}
-                            . Negativ = Lieferverzug (OOS-Tage vor Ankunft).
+                            <strong className="text-slate-800">Eigenes Lager:</strong> Amazon aus dem externen /
+                            eigenen Lager nachfüllen (kurze Transferzeit). Nur nötig, wenn Amazon-Reichweite die
+                            Transferzeit unterschreitet und dort noch Bestand liegt.
                           </p>
                           <p>
-                            <strong className="text-slate-800">Nachbestellmenge:</strong> Vorjahresbedarf (ggf. mit
-                            Wachstum, sonst aktuelles Verkaufstempo ab erstem Verkaufstag) über{" "}
-                            {reorderPlanTop
-                              ? `${reorderPlanTop.coverDays} Tage = ${reorderPlanTop.leadTimeDays} Lieferzeit` +
-                                (reorderPlanTop.bufferDays > 0
-                                  ? ` + ${reorderPlanTop.bufferDays} Puffer`
-                                  : "")
-                              : "Charge-Zeitraum"}
-                            , beginnend ab erwarteter Ankunft – nicht abzüglich aktuellem Bestand.
-                            {reorderPlanTop
-                              ? ` Prognose ${nfTop.format(Math.round(reorderPlanTop.shipmentDemand))} Stück`
+                            <strong className="text-slate-800">Lieferant:</strong> Neue Bestellung mit langer
+                            Lieferzeit. Nur nötig, wenn Amazon + eigenes Lager (+ offene Bestellung) die
+                            Lieferanten-Leadzeit nicht mehr decken.
+                          </p>
+                          <p>
+                            <strong className="text-slate-800">Menge:</strong> Vorjahresbedarf über{" "}
+                            {reorderPlanTop ? `${reorderPlanTop.coverDays} Tage` : "Charge-Zeitraum"}, abzüglich
+                            lokalem Bestand und offener Bestellung
+                            {cartonOrder && cartonOrder.orderQty > 0
+                              ? ` → ${nfTop.format(cartonOrder.orderQty)} Stück`
                               : ""}
-                            {cartonOrder?.rounded
-                              ? `, auf volle Kartons = ${nfTop.format(cartonOrder.orderQty)} Stück`
-                              : cartonOrder && cartonOrder.orderQty > 0
-                                ? ` = ${nfTop.format(cartonOrder.orderQty)} Stück`
-                                : ""}
                             .
                           </p>
                           <Link href="/sku-stammdaten" className="inline-block text-slate-600 underline">
-                            Stammdaten / Pufferzeit anpassen
+                            Stammdaten anpassen
                           </Link>
                         </div>
                       )}
                     </div>
                   </div>
-                  <div className="mt-0.5 font-semibold tabular-nums text-teal-950">
-                    {cartonOrder && cartonOrder.orderQty > 0
-                      ? `${nfTop.format(cartonOrder.orderQty)} Stück`
-                      : "nicht nötig"}
+                  <div className="mt-1.5 space-y-1 text-xs leading-snug text-teal-950">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-teal-800/75">Eigenes Lager</span>
+                      <span className="font-semibold tabular-nums">{eigenesLagerLabel}</span>
+                    </div>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-teal-800/75">Lieferant</span>
+                      <span className="font-semibold tabular-nums">{lieferantLabel}</span>
+                    </div>
                   </div>
-                  {reorderPlanTop && cartonOrder && cartonOrder.orderQty > 0 && (
-                    <div className="mt-0.5 text-xs text-teal-800/70">
-                      Nächste Charge reicht für {nfTop.format(reorderPlanTop.coverDays)} Tage aus
+                  {onOrderUnits > 0 && (
+                    <div className="mt-1 space-y-0.5 text-[11px] leading-snug text-teal-800/75">
+                      {onOrderCoverDays != null ? (
+                        <div>
+                          Neue Lieferung reicht ~ {nfTop.format(onOrderCoverDays)} Tage ab Ankunft
+                        </div>
+                      ) : null}
+                      {stockAction === "order_supplier" &&
+                        cartonOrder &&
+                        cartonOrder.orderQty > 0 && (
+                          <div>Zusätzlich nachbestellen: {nfTop.format(cartonOrder.orderQty)} Stück</div>
+                        )}
                     </div>
                   )}
+                  {onOrderUnits <= 0 &&
+                    stockAction === "order_supplier" &&
+                    reorderPlanTop &&
+                    cartonOrder &&
+                    cartonOrder.orderQty > 0 && (
+                      <div className="mt-1 text-[11px] text-teal-800/75">
+                        Charge für {nfTop.format(reorderPlanTop.coverDays)} Tage
+                      </div>
+                    )}
+                  {localQty > 0 &&
+                    daysUntilOos != null &&
+                    daysUntilOos <= transferLeadDays && (
+                      <div className="mt-1 text-[11px] text-teal-800/75">
+                        {nfTop.format(localQty)} Stück im eigenen / externen Lager
+                      </div>
+                    )}
                 </div>
               </div>
 
-              {reorderTiming.status === "too_late" && (
+              {stockAction === "order_supplier" && reorderTiming.status === "too_late" && (
                 <p className="mt-3 text-sm leading-relaxed text-slate-600">
-                  Bestand reicht noch ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tage. Bestellst du heute,
+                  Pipeline reicht noch ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tage. Bestellst du heute,
                   fehlt die Ware {nfTop.format(Math.abs(reorderTiming.daysUntilMustOrder!))} Tage vor Ankunft –
                   in dem Zeitraum kein Verkauf (laut Prognose).
                 </p>
               )}
 
-              {reorderTiming.status === "already_oos" && (
+              {stockAction === "order_supplier" && reorderTiming.status === "already_oos" && (
                 <p className="mt-3 text-sm leading-relaxed text-slate-600">
-                  Bestand ist leer. Bestellst du heute, kommt Ware erst in {leadTimeDays} Tagen an – so lange
+                  Pipeline ist leer. Bestellst du heute, kommt Ware erst in {leadTimeDays} Tagen an – so lange
                   kein Verkauf.
                 </p>
               )}
@@ -1518,8 +1916,8 @@ export default function DashboardPage() {
                   inventoryLeft={inventoryLeft}
                   inventoryOnHand={inventoryOnHand}
                   inventoryInbound={inventoryInbound}
-                  recent30Units={currentRecent30Units}
-                  recentTempoDays={currentRecentTempoDays}
+                  oosDateAmazonISO={overviewSku?.estimatedOosDate ?? null}
+                  oosDateGesamtISO={overviewSku?.estimatedOosDateAmazonAndLocal ?? null}
                 />
               )}
               {showPreviousYearChart && (

@@ -3,12 +3,17 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CartonSpecRow } from "@/lib/carton-specs";
+import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
 
 type Draft = {
   unitsPerCarton: string;
   productionTimeDays: string;
   shippingTimeDays: string;
   bufferTimeDays: string;
+  localQty: string;
+  onOrderUnits: string;
+  onOrderOrderedAt: string;
+  transferLeadDays: string;
   cartonLenCm: string;
   cartonWCm: string;
   cartonHCm: string;
@@ -43,6 +48,24 @@ const COLUMN_HELP = [
       "Beispiel: Lieferzeit 90 Tage, Puffer 60 → Charge für 150 Tage. " +
       "Die Nachbestellmenge ist der Vorjahresbedarf über genau diesen Zeitraum, ab dem Tag an dem die Ware voraussichtlich ankommt. " +
       "Leer oder 0 = nur Lieferzeit als Charge-Reichweite.",
+  },
+  {
+    key: "Lokal",
+    text:
+      "Bestand im eigenen / 3PL-Lager (nicht Amazon). Wird bei neuem Amazon-Zulauf automatisch reduziert.",
+  },
+  {
+    key: "Bestellt",
+    text: "Offene Bestellung beim Lieferanten – noch nicht im lokalen Lager angekommen.",
+  },
+  {
+    key: "Bestelldatum",
+    text:
+      "Datum der Lieferantenbestellung. Daraus schätzen wir Ankunft und mögliche Sales-Lücken, bis Ware bei Amazon ist.",
+  },
+  {
+    key: "Transfer",
+    text: "Tage vom lokalen Lager bis Amazon (Standard 7). Steuert „Amazon nachfüllen“.",
   },
   {
     key: "L / B / H",
@@ -90,6 +113,15 @@ function toDraft(row: CartonSpecRow): Draft {
     productionTimeDays: row.productionTimeDays != null ? String(row.productionTimeDays) : "",
     shippingTimeDays: row.shippingTimeDays != null ? String(row.shippingTimeDays) : "",
     bufferTimeDays: row.bufferTimeDays != null ? String(row.bufferTimeDays) : "",
+    localQty: row.localQty != null && row.localQty > 0 ? String(row.localQty) : row.localQty === 0 ? "0" : "",
+    onOrderUnits:
+      row.onOrderUnits != null && row.onOrderUnits > 0
+        ? String(row.onOrderUnits)
+        : row.onOrderUnits === 0
+          ? "0"
+          : "",
+    onOrderOrderedAt: row.onOrderOrderedAt ? String(row.onOrderOrderedAt).slice(0, 10) : "",
+    transferLeadDays: String(row.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS),
     cartonLenCm: row.cartonLenCm != null ? String(row.cartonLenCm) : "",
     cartonWCm: row.cartonWCm != null ? String(row.cartonWCm) : "",
     cartonHCm: row.cartonHCm != null ? String(row.cartonHCm) : "",
@@ -184,6 +216,11 @@ export default function SkuStammdatenTable() {
           productionTimeDays: emptyToNull(draft.productionTimeDays),
           shippingTimeDays: emptyToNull(draft.shippingTimeDays),
           bufferTimeDays: emptyToNull(draft.bufferTimeDays),
+          localQty: emptyToNull(draft.localQty) ?? 0,
+          onOrderUnits: emptyToNull(draft.onOrderUnits) ?? 0,
+          onOrderOrderedAt: draft.onOrderOrderedAt.trim() || null,
+          transferLeadDays:
+            emptyToNull(draft.transferLeadDays) ?? DEFAULT_TRANSFER_LEAD_DAYS,
           cartonLenCm: emptyToNull(draft.cartonLenCm),
           cartonWCm: emptyToNull(draft.cartonWCm),
           cartonHCm: emptyToNull(draft.cartonHCm),
@@ -203,6 +240,10 @@ export default function SkuStammdatenTable() {
                 imageUrl: row.imageUrl,
                 available: row.available,
                 inbound: row.inbound,
+                localQty: json.item.localQty ?? row.localQty,
+                onOrderUnits: json.item.onOrderUnits ?? row.onOrderUnits,
+                onOrderOrderedAt: json.item.onOrderOrderedAt ?? row.onOrderOrderedAt,
+                transferLeadDays: json.item.transferLeadDays ?? row.transferLeadDays,
                 hasSpec: true,
               }
             : row,
@@ -228,9 +269,9 @@ export default function SkuStammdatenTable() {
           <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-600">Stammdaten</p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">SKU-Stammdaten</h1>
           <p className="mt-1.5 max-w-2xl text-sm leading-relaxed text-slate-700">
-            Lieferzeiten, Puffer und Kartonmaße pro Produkt. Die{" "}
-            <strong className="font-semibold text-slate-900">Pufferzeit</strong> legt fest, wie lange eine
-            Nachbestellung nach Ankunft reichen soll – daraus berechnet das Dashboard die Bestellmenge.
+            Lieferzeiten, lokaler Bestand, offene Lieferantenbestellung und Kartonmaße. Der{" "}
+            <strong className="font-semibold text-slate-900">lokale Bestand</strong> sinkt automatisch,
+            wenn neuer Amazon-Zulauf erscheint.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -320,17 +361,21 @@ export default function SkuStammdatenTable() {
         <div className="overflow-hidden rounded-2xl border border-slate-300 bg-white shadow-sm">
           <table className="w-full table-fixed border-collapse text-left text-[13px]">
             <colgroup>
-              <col className="w-[24%]" />
+              <col className="w-[20%]" />
+              <col className="w-[6%]" />
+              <col className="w-[6%]" />
+              <col className="w-[6%]" />
+              <col className="w-[6%]" />
+              <col className="w-[6%]" />
+              <col className="w-[5%]" />
+              <col className="w-[5%]" />
+              <col className="w-[8%]" />
+              <col className="w-[5%]" />
+              <col className="w-[4%]" />
+              <col className="w-[4%]" />
+              <col className="w-[4%]" />
+              <col className="w-[4%]" />
               <col className="w-[7%]" />
-              <col className="w-[8%]" />
-              <col className="w-[8%]" />
-              <col className="w-[8%]" />
-              <col className="w-[8%]" />
-              <col className="w-[5%]" />
-              <col className="w-[5%]" />
-              <col className="w-[5%]" />
-              <col className="w-[5%]" />
-              <col className="w-[9%]" />
             </colgroup>
             <thead>
               <tr className="border-b border-slate-300 bg-slate-800 text-[10px] font-semibold uppercase tracking-[0.06em] text-slate-100">
@@ -350,13 +395,29 @@ export default function SkuStammdatenTable() {
                 />
                 <HeaderHint
                   label="Lieferdauer"
-                  hint="Versanddauer bis Ankunft beim Amazon Lager."
+                  hint="Versanddauer bis Ankunft beim lokalen Lager / Supplier-Lead."
                 />
                 <HeaderHint
                   label="Gesamtdauer"
-                  hint="Lieferzeit = Produktionsdauer + Lieferdauer. Steuert nur den Bestellzeitpunkt (Wann bestellen?), nicht die Menge."
+                  hint="Lieferzeit = Produktionsdauer + Lieferdauer. Steuert den Bestellzeitpunkt beim Lieferanten."
                 />
                 <HeaderHint label="Pufferzeit" hint={PUFFER_HOVER} wide />
+                <HeaderHint
+                  label="Lokal"
+                  hint="Bestand im eigenen / 3PL-Lager. Wird bei neuem Amazon-Zulauf automatisch reduziert."
+                />
+                <HeaderHint
+                  label="Bestellt"
+                  hint="Offene Bestellung beim Lieferanten (noch nicht lokal angekommen)."
+                />
+                <HeaderHint
+                  label="Bestelldatum"
+                  hint="Wann beim Lieferanten bestellt wurde – für ETA und Sales-Lücken-Hinweis."
+                />
+                <HeaderHint
+                  label="Transfer"
+                  hint="Tage lokales Lager → Amazon (Standard 7)."
+                />
                 <HeaderHint label="L" hint="Kartonlänge in cm." />
                 <HeaderHint label="B" hint="Kartonbreite in cm." />
                 <HeaderHint label="H" hint="Kartonhöhe in cm." />
@@ -457,6 +518,39 @@ export default function SkuStammdatenTable() {
                           → {chargeDays} T
                         </div>
                       )}
+                    </td>
+                    {(
+                      ["localQty", "onOrderUnits"] as const
+                    ).map((key) => (
+                      <td key={key} className="px-1.5 py-2 text-center">
+                        <input
+                          value={draft[key]}
+                          onChange={(event) => updateDraft(item.sellerSku, key, event.target.value)}
+                          placeholder="0"
+                          className={`${inputClass} mx-auto max-w-[4.5rem]`}
+                        />
+                      </td>
+                    ))}
+                    <td className="px-1 py-2 text-center">
+                      <input
+                        type="date"
+                        value={draft.onOrderOrderedAt}
+                        onChange={(event) =>
+                          updateDraft(item.sellerSku, "onOrderOrderedAt", event.target.value)
+                        }
+                        className={`${inputClass} mx-auto max-w-[9.5rem] text-[11px]`}
+                        title="Bestelldatum beim Lieferanten"
+                      />
+                    </td>
+                    <td className="px-1.5 py-2 text-center">
+                      <input
+                        value={draft.transferLeadDays}
+                        onChange={(event) =>
+                          updateDraft(item.sellerSku, "transferLeadDays", event.target.value)
+                        }
+                        placeholder={String(DEFAULT_TRANSFER_LEAD_DAYS)}
+                        className={`${inputClass} mx-auto max-w-[4.5rem]`}
+                      />
                     </td>
                     {(
                       ["cartonLenCm", "cartonWCm", "cartonHCm", "cartonWeightKg"] as const

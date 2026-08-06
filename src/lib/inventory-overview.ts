@@ -12,6 +12,14 @@ export type InventoryOverviewItem = {
   reserved: number;
   pendingCustomerOrders: number;
   inbound: number;
+  /** Local / 3PL warehouse units. */
+  localQty?: number;
+  /** Open supplier PO units. */
+  onOrderUnits?: number;
+  /** Days local warehouse → Amazon. */
+  transferLeadDays?: number;
+  /** Date the open supplier PO was placed (YYYY-MM-DD). */
+  onOrderOrderedAt?: string | null;
   units30: number;
   units90: number;
   dailySales30: number;
@@ -21,12 +29,23 @@ export type InventoryOverviewItem = {
   growthPercent: number;
   comparisonCurrentUnits: number;
   comparisonPreviousUnits: number;
-  /** Cover with available + inbound (decision metric for Nachschub). */
+  /** Cover with available + inbound (Amazon FBA). */
   daysOfCover: number | null;
   estimatedOosDate: string | null;
   /** Cover from sellable stock only (without inbound). */
   daysOfCoverOnHand: number | null;
   estimatedOosDateOnHand: string | null;
+  /**
+   * Cover including local warehouse (after transfer), excluding open supplier POs.
+   * Used for Lieferverzug vs Bestell-Ankunft.
+   */
+  daysOfCoverAmazonAndLocal: number | null;
+  estimatedOosDateAmazonAndLocal: string | null;
+  /**
+   * Cover including local + open supplier POs (full pipeline).
+   */
+  daysOfCoverWithLocal: number | null;
+  estimatedOosDateWithLocal: string | null;
   status: StockStatus;
 };
 
@@ -39,8 +58,11 @@ export function classifyStockStatus(
   available: number,
   inbound: number,
   daysOfCover: number | null,
+  localQty = 0,
 ): StockStatus {
-  if (effectiveInventoryUnits(available, inbound) <= 0) return "out";
+  const amazon = effectiveInventoryUnits(available, inbound);
+  const local = Math.max(0, Math.floor(Number(localQty) || 0));
+  if (amazon <= 0 && local <= 0) return "out";
   if (daysOfCover === null) return "no_sales";
   if (daysOfCover <= 30) return "critical";
   if (daysOfCover <= 60) return "warning";
@@ -149,8 +171,26 @@ export function filterItemsBySelectedSku(
 }
 
 export function inventoryActionHint(item: InventoryOverviewItem): string {
-  if (item.status === "out") return "Jetzt bestellen";
-  if (item.daysOfCover === null) return "Kein Absatztempo";
+  const localQty = Math.max(0, Number(item.localQty) || 0);
+  const onOrder = Math.max(0, Number(item.onOrderUnits) || 0);
+  const transfer = Math.max(0, Number(item.transferLeadDays) || 7);
+  const decisionCover = item.daysOfCoverWithLocal ?? item.daysOfCover;
+
+  if (item.status === "out" && localQty <= 0 && onOrder <= 0) return "Jetzt bestellen";
+  if (item.daysOfCover === null && decisionCover === null) return "Kein Absatztempo";
+
+  if (
+    localQty > 0 &&
+    item.daysOfCover !== null &&
+    item.daysOfCover <= transfer &&
+    (decisionCover == null || decisionCover > transfer)
+  ) {
+    return `Amazon nachfüllen · lokal ${localQty} Stk`;
+  }
+
+  if (onOrder > 0 && decisionCover != null && decisionCover > 30) {
+    return `Bestellung unterwegs · Pipeline ${decisionCover} Tage`;
+  }
 
   const inboundHelps =
     item.inbound > 0 &&
@@ -166,20 +206,38 @@ export function inventoryActionHint(item: InventoryOverviewItem): string {
       ? `Nur Zulauf · reicht ${item.daysOfCover} Tage`
       : `Zulauf unterwegs · reicht ${item.daysOfCover} Tage`;
   }
-  if (item.daysOfCover <= 14) return `Jetzt bestellen · reicht ${item.daysOfCover} Tage`;
-  if (item.daysOfCover <= 30) return `Bald nachbestellen · reicht ${item.daysOfCover} Tage`;
-  if (item.daysOfCover <= 60) {
-    return inboundHelps
-      ? `Beobachten · ${item.daysOfCover} Tage inkl. Zulauf`
-      : `Beobachten · reicht ${item.daysOfCover} Tage`;
+
+  const cover = decisionCover ?? item.daysOfCover;
+  if (cover == null) return "Kein Absatztempo";
+  if (cover <= 14) {
+    return localQty > 0
+      ? `Amazon nachfüllen · Pipeline ${cover} Tage`
+      : `Jetzt bestellen · reicht ${cover} Tage`;
   }
-  return inboundHelps
-    ? `Bestand reicht ${item.daysOfCover} Tage inkl. Zulauf`
-    : `Bestand reicht ${item.daysOfCover} Tage`;
+  if (cover <= 30) {
+    return localQty > 0
+      ? `Bald nachfüllen · Pipeline ${cover} Tage`
+      : `Bald nachbestellen · reicht ${cover} Tage`;
+  }
+  if (cover <= 60) {
+    return inboundHelps || localQty > 0
+      ? `Beobachten · ${cover} Tage inkl. Pipeline`
+      : `Beobachten · reicht ${cover} Tage`;
+  }
+  return inboundHelps || localQty > 0
+    ? `Bestand reicht ${cover} Tage inkl. Pipeline`
+    : `Bestand reicht ${cover} Tage`;
 }
 
-/** Short status chip when FBA is empty but inbound covers demand. */
+/** Short status chip when FBA is empty but inbound/local covers demand. */
 export function inventoryStatusLabel(item: InventoryOverviewItem, fallback: string): string {
   if (item.available <= 0 && item.inbound > 0 && item.status !== "out") return "Zulauf";
+  if (
+    item.available <= 0 &&
+    (item.localQty || 0) > 0 &&
+    item.status !== "out"
+  ) {
+    return "Lokal";
+  }
   return fallback;
 }

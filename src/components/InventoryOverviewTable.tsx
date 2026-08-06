@@ -8,8 +8,15 @@ import {
   type StockStatus,
 } from "@/lib/inventory-overview";
 
-type Filter = "all" | "risk" | "out" | "inbound" | "no_sales";
-type Sort = "risk" | "cover" | "available" | "sales" | "asin";
+type Filter =
+  | "all"
+  | "risk"
+  | "out"
+  | "inbound"
+  | "risk_amazon"
+  | "risk_gesamt"
+  | "no_sales";
+type Sort = "risk" | "cover_amazon" | "cover_gesamt" | "available" | "sales" | "asin";
 
 const statusMeta: Record<StockStatus, { label: string; badge: string; dot: string }> = {
   out: { label: "Leer", badge: "bg-red-50 text-red-700 ring-red-200", dot: "bg-red-500" },
@@ -25,15 +32,72 @@ function formatDate(value: string | null): string {
   return new Intl.DateTimeFormat("de-DE", { day: "2-digit", month: "2-digit" }).format(date);
 }
 
+function amazonCover(item: InventoryOverviewItem): number | null {
+  return item.daysOfCover;
+}
+
+function gesamtCover(item: InventoryOverviewItem): number | null {
+  return item.daysOfCoverAmazonAndLocal ?? item.daysOfCoverWithLocal ?? item.daysOfCover;
+}
+
+function amazonOosDate(item: InventoryOverviewItem): string | null {
+  return item.estimatedOosDate;
+}
+
+function gesamtOosDate(item: InventoryOverviewItem): string | null {
+  return (
+    item.estimatedOosDateAmazonAndLocal ??
+    item.estimatedOosDateWithLocal ??
+    item.estimatedOosDate
+  );
+}
+
+function isCoverRisk(cover: number | null): boolean {
+  return cover !== null && cover <= 30;
+}
+
+function formatCoverDays(cover: number | null, nf: Intl.NumberFormat): string {
+  if (cover === null) return "–";
+  if (cover === 0) return "leer";
+  return `${nf.format(cover)} T`;
+}
+
+function coverBarClass(cover: number | null): string {
+  if (cover === null) return "bg-slate-300";
+  if (cover <= 0) return "bg-red-500";
+  if (cover <= 30) return "bg-orange-500";
+  if (cover <= 60) return "bg-amber-400";
+  return "bg-emerald-500";
+}
+
 function downloadCsv(items: InventoryOverviewItem[]) {
   const header = [
-    "Produkt", "ASIN", "SKU", "Status", "Verfügbar", "Inbound",
-    "Reichweite inkl. Inbound", "Reichweite ohne Inbound", "OOS-Datum",
+    "Produkt",
+    "ASIN",
+    "SKU",
+    "Status",
+    "Verfügbar",
+    "Inbound",
+    "Lokal",
+    "Bestellt",
+    "Reichweite Amazon",
+    "OOS Amazon",
+    "Reichweite Insgesamt",
+    "OOS Insgesamt",
   ];
   const lines = items.map((item) => [
-    item.productName || "", item.asin, item.sku, statusMeta[item.status].label,
-    item.available, item.inbound,
-    item.daysOfCover ?? "", item.daysOfCoverOnHand ?? "", item.estimatedOosDate ?? "",
+    item.productName || "",
+    item.asin,
+    item.sku,
+    statusMeta[item.status].label,
+    item.available,
+    item.inbound,
+    item.localQty ?? 0,
+    item.onOrderUnits ?? 0,
+    amazonCover(item) ?? "",
+    amazonOosDate(item) ?? "",
+    gesamtCover(item) ?? "",
+    gesamtOosDate(item) ?? "",
   ]);
   const csv = [header, ...lines]
     .map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(";"))
@@ -45,6 +109,34 @@ function downloadCsv(items: InventoryOverviewItem[]) {
   link.download = `lagerbestand-${new Date().toISOString().slice(0, 10)}.csv`;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+function CoverCell({
+  cover,
+  oosDate,
+  nf,
+}: {
+  cover: number | null;
+  oosDate: string | null;
+  nf: Intl.NumberFormat;
+}) {
+  const barWidth = cover === null ? 0 : Math.min(100, (cover / 120) * 100);
+  return (
+    <div className="min-w-[88px]">
+      <div className="flex items-baseline justify-between gap-1.5">
+        <span className="text-[13px] font-semibold tabular-nums text-slate-900">
+          {formatCoverDays(cover, nf)}
+        </span>
+        <span className="text-[10px] text-slate-500">{formatDate(oosDate)}</span>
+      </div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-slate-100">
+        <div
+          className={`h-full rounded-full ${coverBarClass(cover)}`}
+          style={{ width: `${barWidth}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 export default function InventoryOverviewTable({
@@ -74,6 +166,10 @@ export default function InventoryOverviewTable({
       critical: items.filter((item) => item.status === "critical").length,
       warning: items.filter((item) => item.status === "warning").length,
       inbound: items.filter((item) => item.inbound > 0).length,
+      riskAmazon: items.filter((item) => isCoverRisk(amazonCover(item)) || item.status === "out")
+        .length,
+      riskGesamt: items.filter((item) => isCoverRisk(gesamtCover(item)) || item.status === "out")
+        .length,
     };
   }, [data]);
 
@@ -92,16 +188,36 @@ export default function InventoryOverviewTable({
       if (filter === "out" && item.status !== "out") return false;
       if (filter === "inbound" && item.inbound <= 0) return false;
       if (filter === "no_sales" && item.status !== "no_sales") return false;
+      if (filter === "risk_amazon" && !(isCoverRisk(amazonCover(item)) || item.status === "out")) {
+        return false;
+      }
+      if (filter === "risk_gesamt" && !(isCoverRisk(gesamtCover(item)) || item.status === "out")) {
+        return false;
+      }
       return true;
     });
 
-    const riskRank: Record<StockStatus, number> = { out: 0, critical: 1, warning: 2, healthy: 3, no_sales: 4 };
+    const riskRank: Record<StockStatus, number> = {
+      out: 0,
+      critical: 1,
+      warning: 2,
+      healthy: 3,
+      no_sales: 4,
+    };
     return items.sort((a, b) => {
-      if (sort === "cover") return (a.daysOfCover ?? Number.MAX_SAFE_INTEGER) - (b.daysOfCover ?? Number.MAX_SAFE_INTEGER);
+      if (sort === "cover_amazon") {
+        return (amazonCover(a) ?? Number.MAX_SAFE_INTEGER) - (amazonCover(b) ?? Number.MAX_SAFE_INTEGER);
+      }
+      if (sort === "cover_gesamt") {
+        return (gesamtCover(a) ?? Number.MAX_SAFE_INTEGER) - (gesamtCover(b) ?? Number.MAX_SAFE_INTEGER);
+      }
       if (sort === "available") return b.available - a.available;
       if (sort === "sales") return b.units30 - a.units30;
       if (sort === "asin") return a.asin.localeCompare(b.asin);
-      return riskRank[a.status] - riskRank[b.status] || (a.daysOfCover ?? 999999) - (b.daysOfCover ?? 999999);
+      return (
+        riskRank[a.status] - riskRank[b.status] ||
+        (amazonCover(a) ?? 999999) - (amazonCover(b) ?? 999999)
+      );
     });
   }, [data, search, filter, sort]);
 
@@ -134,6 +250,8 @@ export default function InventoryOverviewTable({
           <div className="flex flex-wrap gap-1">
             {filterChip("all", "Alle", counts.total)}
             {filterChip("risk", "Risiko", counts.out + counts.critical)}
+            {filterChip("risk_amazon", "Amazon ≤30T", counts.riskAmazon)}
+            {filterChip("risk_gesamt", "Gesamt ≤30T", counts.riskGesamt)}
             {filterChip("out", "Leer", counts.out)}
             {filterChip("inbound", "Inbound", counts.inbound)}
           </div>
@@ -151,7 +269,8 @@ export default function InventoryOverviewTable({
             className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs"
           >
             <option value="risk">Dringlichkeit</option>
-            <option value="cover">Reichweite</option>
+            <option value="cover_amazon">Reichweite Amazon</option>
+            <option value="cover_gesamt">Reichweite Insgesamt</option>
             <option value="sales">Absatz</option>
             <option value="available">Bestand</option>
           </select>
@@ -181,29 +300,30 @@ export default function InventoryOverviewTable({
       {!loading && !error && (
         <>
           <div className="h-[28rem] overflow-auto">
-            <table className="min-w-[760px] w-full border-collapse text-left text-[13px]">
+            <table className="min-w-[900px] w-full border-collapse text-left text-[13px]">
               <thead className="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
                 <tr className="border-b border-slate-200">
-                  <th className="px-2.5 py-1.5 font-semibold">Produkt</th>
-                  <th className="px-1.5 py-1.5 font-semibold">Status</th>
-                  <th className="px-1.5 py-1.5 text-right font-semibold">Verf.</th>
-                  <th className="px-1.5 py-1.5 pr-6 text-right font-semibold sm:pr-10">In</th>
-                  <th className="py-1.5 pl-4 pr-2.5 font-semibold sm:pl-8">Reichweite</th>
+                  <th className="px-2 py-1.5 font-semibold">Produkt</th>
+                  <th className="px-1 py-1.5 font-semibold">Status</th>
+                  <th className="px-1 py-1.5 text-right font-semibold">Verf.</th>
+                  <th className="px-1 py-1.5 text-right font-semibold">In</th>
+                  <th className="px-1 py-1.5 text-right font-semibold">Lokal</th>
+                  <th className="px-1.5 py-1.5 font-semibold">Amazon</th>
+                  <th className="px-1.5 py-1.5 pr-2 font-semibold">Insgesamt</th>
                 </tr>
               </thead>
               <tbody>
                 {visibleItems.map((item) => {
                   const meta = statusMeta[item.status];
-                  const coverForBar = item.daysOfCover;
-                  const barWidth = coverForBar === null ? 0 : Math.min(100, (coverForBar / 120) * 100);
                   const active = selectedSku === item.sku;
-                  const inboundHelps =
-                    item.inbound > 0 &&
-                    item.daysOfCoverOnHand !== null &&
-                    item.daysOfCover !== null &&
-                    item.daysOfCoverOnHand < item.daysOfCover;
                   const statusText = inventoryStatusLabel(item, meta.label);
-                  const soonOos = item.status === "out" || item.status === "critical";
+                  const amz = amazonCover(item);
+                  const gesamt = gesamtCover(item);
+                  const soonOos =
+                    item.status === "out" ||
+                    item.status === "critical" ||
+                    isCoverRisk(amz) ||
+                    isCoverRisk(gesamt);
                   return (
                     <tr
                       key={`${item.asin}-${item.sku}`}
@@ -215,12 +335,12 @@ export default function InventoryOverviewTable({
                             : ""
                       }`}
                     >
-                      <td className="px-2.5 py-1.5">
+                      <td className="px-2 py-1.5">
                         <button
                           type="button"
                           onClick={() => onSelectSku?.(item.sku)}
                           title="Produkt im Dashboard öffnen"
-                          className={`flex max-w-[320px] cursor-pointer items-center gap-2 rounded-lg px-1.5 py-1 text-left transition ${
+                          className={`flex max-w-[280px] cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left transition ${
                             active
                               ? "bg-sky-100/80 ring-1 ring-sky-300"
                               : "bg-slate-50/80 ring-1 ring-slate-200/80 hover:bg-sky-50 hover:ring-sky-200"
@@ -249,7 +369,7 @@ export default function InventoryOverviewTable({
                           </span>
                         </button>
                       </td>
-                      <td className="px-1.5 py-1.5">
+                      <td className="px-1 py-1.5">
                         <span
                           className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${
                             statusText === "Zulauf"
@@ -260,37 +380,33 @@ export default function InventoryOverviewTable({
                           {statusText}
                         </span>
                       </td>
-                      <td className="px-1.5 py-1.5 text-right font-semibold tabular-nums text-slate-900">
+                      <td className="px-1 py-1.5 text-right font-semibold tabular-nums text-slate-900">
                         {nf.format(item.available)}
                       </td>
                       <td
-                        className={`px-1.5 py-1.5 pr-6 text-right tabular-nums sm:pr-10 ${
+                        className={`px-1 py-1.5 text-right tabular-nums ${
                           item.inbound > 0 ? "font-semibold text-sky-700" : "text-slate-400"
                         }`}
                       >
                         {item.inbound > 0 ? `+${nf.format(item.inbound)}` : "0"}
                       </td>
-                      <td className="min-w-[168px] py-1.5 pl-4 pr-2.5 sm:pl-8">
-                        <div className="flex items-baseline justify-between gap-2">
-                          <span className="text-[13px] font-semibold tabular-nums text-slate-900">
-                            {item.daysOfCover === null
-                              ? "–"
-                              : item.daysOfCover === 0
-                                ? "leer"
-                                : `${nf.format(item.daysOfCover)} T`}
-                          </span>
-                          <span className="text-[10px] text-slate-500">{formatDate(item.estimatedOosDate)}</span>
-                        </div>
-                        {inboundHelps ? (
-                          <div className="mt-0.5 text-[10px] leading-tight text-sky-700">
-                            inkl. Zulauf · ohne {item.daysOfCoverOnHand === 0 ? "leer" : `${nf.format(item.daysOfCoverOnHand!)} T`}
+                      <td
+                        className={`px-1 py-1.5 text-right tabular-nums ${
+                          (item.localQty || 0) > 0 ? "font-semibold text-violet-700" : "text-slate-400"
+                        }`}
+                      >
+                        {(item.localQty || 0) > 0 ? nf.format(item.localQty || 0) : "–"}
+                        {(item.onOrderUnits || 0) > 0 ? (
+                          <div className="text-[10px] font-normal text-violet-500">
+                            +{nf.format(item.onOrderUnits || 0)} best.
                           </div>
-                        ) : item.inbound > 0 ? (
-                          <div className="mt-0.5 text-[10px] leading-tight text-slate-500">inkl. Zulauf</div>
                         ) : null}
-                        <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-slate-100">
-                          <div className={`h-full rounded-full ${inboundHelps ? "bg-sky-500" : meta.dot}`} style={{ width: `${barWidth}%` }} />
-                        </div>
+                      </td>
+                      <td className="px-1.5 py-1.5">
+                        <CoverCell cover={amz} oosDate={amazonOosDate(item)} nf={nf} />
+                      </td>
+                      <td className="px-1.5 py-1.5 pr-2">
+                        <CoverCell cover={gesamt} oosDate={gesamtOosDate(item)} nf={nf} />
                       </td>
                     </tr>
                   );
@@ -302,7 +418,8 @@ export default function InventoryOverviewTable({
             )}
           </div>
           <div className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-500">
-            {visibleItems.length}/{counts.total} · Reichweite = Verfügbar + Inbound
+            {visibleItems.length}/{counts.total} · Amazon = FBA (+ Zulauf) · Insgesamt = Amazon + Eigenlager
+            (Transfer)
           </div>
         </>
       )}

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   addWeeksToISO,
   calculatePositiveGrowthFactor,
+  chartWeekFromOosDate,
   chooseForecastDemand,
   explainForecastDemand,
   periodsUntilOos,
@@ -104,6 +105,37 @@ test("weekly growth factor ignores future weeks and clamps negative growth", () 
   );
 });
 
+test("chart week from OOS date matches ISO week of card date", () => {
+  // 23.09.2026 is Wednesday in KW 39 (21.–27.09.2026)
+  assert.equal(chartWeekFromOosDate("2026-09-23", 2026), 39);
+  assert.equal(chartWeekFromOosDate("2026-09-14", 2026), 38);
+  assert.equal(chartWeekFromOosDate("2026-09-23", 2025), null);
+});
+
+test("delayed local stock extends weekly cover past Amazon OOS", () => {
+  const previous = new Map<number, number>();
+  for (let week = 1; week <= 53; week++) previous.set(week, 10);
+
+  const amazonOnly = projectWeeklyOos({
+    inventory: 15,
+    currentWeek: 1,
+    previousYearWeekTotals: previous,
+    recent30Units: 0,
+  });
+  assert.equal(amazonOnly.weeks, 2);
+  assert.equal(amazonOnly.weekKw, 3);
+
+  const withLocal = projectWeeklyOos({
+    inventory: 15,
+    currentWeek: 1,
+    previousYearWeekTotals: previous,
+    recent30Units: 0,
+    delayedAdditions: [{ weekOffset: 3, units: 40 }],
+  });
+  assert.ok(withLocal.weeks > amazonOnly.weeks);
+  assert.equal(withLocal.weekKw, 7); // weeks 2-3 burn Amazon; week 3 adds 40; weeks 4-7 burn
+});
+
 test("daily OOS projection marks hybrid when seasonal and recent weeks mix", () => {
   const projection = projectDailyOos({
     inventory: 10,
@@ -115,6 +147,17 @@ test("daily OOS projection marks hybrid when seasonal and recent weeks mix", () 
   });
   assert.equal(projection.daysOfCover, 5);
   assert.equal(projection.forecastMethod, "hybrid");
+});
+
+test("delayed local stock extends cover past Amazon OOS", () => {
+  const projection = projectDailyOos({
+    inventory: 4,
+    todayDemand: { demand: 2, seasonal: false },
+    demandForDayOffset: () => ({ demand: 2, seasonal: false }),
+    delayedAdditions: [{ dayOffset: 3, units: 10 }],
+  });
+  // Days 0-1 burn 4 units → empty day 2; day 3 adds 10 → burns through day 7
+  assert.equal(projection.daysOfCover, 8);
 });
 
 test("reorder plan covers six months after projected OOS with recent fallback", () => {

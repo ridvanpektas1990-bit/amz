@@ -23,6 +23,9 @@ function item(partial: Partial<InventoryOverviewItem> & Pick<InventoryOverviewIt
     reserved: 0,
     pendingCustomerOrders: 0,
     inbound: partial.inbound ?? 0,
+    localQty: partial.localQty ?? 0,
+    onOrderUnits: partial.onOrderUnits ?? 0,
+    transferLeadDays: partial.transferLeadDays ?? 7,
     units30: partial.units30 ?? 0,
     units90: partial.units90 ?? 0,
     dailySales30: partial.dailySales30 ?? 0,
@@ -36,6 +39,15 @@ function item(partial: Partial<InventoryOverviewItem> & Pick<InventoryOverviewIt
     estimatedOosDate: partial.estimatedOosDate ?? null,
     daysOfCoverOnHand: partial.daysOfCoverOnHand ?? partial.daysOfCover ?? null,
     estimatedOosDateOnHand: partial.estimatedOosDateOnHand ?? partial.estimatedOosDate ?? null,
+    daysOfCoverAmazonAndLocal:
+      partial.daysOfCoverAmazonAndLocal ?? partial.daysOfCoverWithLocal ?? partial.daysOfCover ?? null,
+    estimatedOosDateAmazonAndLocal:
+      partial.estimatedOosDateAmazonAndLocal ??
+      partial.estimatedOosDateWithLocal ??
+      partial.estimatedOosDate ??
+      null,
+    daysOfCoverWithLocal: partial.daysOfCoverWithLocal ?? partial.daysOfCover ?? null,
+    estimatedOosDateWithLocal: partial.estimatedOosDateWithLocal ?? partial.estimatedOosDate ?? null,
     status: partial.status,
   };
 }

@@ -18,6 +18,8 @@ import {
   recentSalesTempoFromDaily,
   RECENT_TEMPO_LOOKBACK_DAYS,
 } from "@/lib/recent-sales-tempo";
+import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
+import { applyInboundLocalDeductions, loadLocalStockBySku } from "@/lib/local-stock-db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -136,9 +138,45 @@ export async function GET(req: NextRequest) {
 
     if (inventoryError) throw new Error(`Inventory: ${inventoryError.message}`);
 
+    const inboundBySku = new Map<string, number>();
+    for (const row of (inventoryData as InventoryRow[]) || []) {
+      const sku = String(row.seller_sku || "").trim();
+      if (!sku) continue;
+      inboundBySku.set(sku, Math.max(0, number(row.inbound_total)));
+    }
+    await applyInboundLocalDeductions(sb, tenantId, inboundBySku).catch((error) => {
+      console.warn(
+        "Local stock inbound deduct skipped:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+
     const inventorySkus = (inventoryData as InventoryRow[])
       .map((row) => String(row.seller_sku || "").trim())
       .filter(Boolean);
+    const localBySku = await loadLocalStockBySku(sb, tenantId, inventorySkus).catch((error) => {
+      console.warn(
+        "Local stock load skipped:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return new Map();
+    });
+
+    const leadBySku = new Map<string, number>();
+    if (inventorySkus.length) {
+      const { data: leadRows } = await sb
+        .from("inventory_carton_specs")
+        .select("seller_sku,production_time_days,shipping_time_days")
+        .eq("tenant_id", tenantId)
+        .in("seller_sku", inventorySkus);
+      for (const row of leadRows || []) {
+        const lead =
+          Math.max(0, Number((row as { production_time_days: number | null }).production_time_days) || 0) +
+          Math.max(0, Number((row as { shipping_time_days: number | null }).shipping_time_days) || 0);
+        if (lead > 0) leadBySku.set(String((row as { seller_sku: string }).seller_sku), lead);
+      }
+    }
+
     const inventoryAsins = (inventoryData as InventoryRow[])
       .map((row) => String(row.asin || "").trim())
       .filter(Boolean);
@@ -224,6 +262,11 @@ export async function GET(req: NextRequest) {
         };
         const available = Math.max(0, number(row.inventory_left));
         const inbound = Math.max(0, number(row.inbound_total));
+        const local = localBySku.get(sku);
+        const localQty = local?.localQty ?? 0;
+        const onOrderUnits = local?.onOrderUnits ?? 0;
+        const transferLeadDays = local?.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS;
+        const onOrderOrderedAt = local?.onOrderOrderedAt ?? null;
         const effectiveUnits = effectiveInventoryUnits(available, inbound);
         const recentTempo = recentSalesTempoFromDaily(
           dailyUnitsSeriesFromMap(start30ISO, today, sales.byDate30),
@@ -276,9 +319,53 @@ export async function GET(req: NextRequest) {
           demandForDayOffset,
         });
 
+        const delayedLocalOnly: Array<{ dayOffset: number; units: number }> = [];
+        if (localQty > 0) {
+          delayedLocalOnly.push({ dayOffset: transferLeadDays, units: localQty });
+        }
+
+        const delayedFullPipeline = [...delayedLocalOnly];
+        if (onOrderUnits > 0) {
+          const supplierLead = leadBySku.get(sku) || 0;
+          let onOrderDelay = Math.max(transferLeadDays, supplierLead + transferLeadDays);
+          if (onOrderOrderedAt && supplierLead > 0) {
+            const ordered = Date.parse(`${onOrderOrderedAt}T12:00:00Z`);
+            const todayMs = Date.parse(`${today}T12:00:00Z`);
+            if (Number.isFinite(ordered) && Number.isFinite(todayMs)) {
+              const daysSinceOrder = Math.max(
+                0,
+                Math.round((todayMs - ordered) / 86_400_000),
+              );
+              const remainingToLocal = Math.max(0, supplierLead - daysSinceOrder);
+              onOrderDelay = remainingToLocal + transferLeadDays;
+            }
+          }
+          delayedFullPipeline.push({
+            dayOffset: onOrderDelay,
+            units: onOrderUnits,
+          });
+        }
+
+        const withAmazonAndLocal = projectDailyOos({
+          inventory: effectiveUnits,
+          todayDemand: currentForecast,
+          demandForDayOffset,
+          delayedAdditions: delayedLocalOnly,
+        });
+        const withFullPipeline = projectDailyOos({
+          inventory: effectiveUnits,
+          todayDemand: currentForecast,
+          demandForDayOffset,
+          delayedAdditions: delayedFullPipeline,
+        });
+
         const daysOfCover = withInbound.daysOfCover;
         const daysOfCoverOnHand = onHand.daysOfCover;
-        const status = classifyStockStatus(available, inbound, daysOfCover);
+        const daysOfCoverAmazonAndLocal = withAmazonAndLocal.daysOfCover;
+        const daysOfCoverWithLocal = withFullPipeline.daysOfCover;
+        const statusCover =
+          localQty > 0 || onOrderUnits > 0 ? daysOfCoverWithLocal : daysOfCover;
+        const status = classifyStockStatus(available, inbound, statusCover, localQty);
 
         return {
           asin,
@@ -292,6 +379,10 @@ export async function GET(req: NextRequest) {
           reserved: Math.max(0, number(row.reserved_total)),
           pendingCustomerOrders: Math.max(0, number(row.pending_customer_orders)),
           inbound,
+          localQty,
+          onOrderUnits,
+          transferLeadDays,
+          onOrderOrderedAt,
           units30: sales.units30,
           units90: sales.units90,
           dailySales30: Number(dailySales30.toFixed(2)),
@@ -307,6 +398,12 @@ export async function GET(req: NextRequest) {
           estimatedOosDate: daysOfCover === null ? null : addDays(today, daysOfCover),
           daysOfCoverOnHand,
           estimatedOosDateOnHand: daysOfCoverOnHand === null ? null : addDays(today, daysOfCoverOnHand),
+          daysOfCoverAmazonAndLocal,
+          estimatedOosDateAmazonAndLocal:
+            daysOfCoverAmazonAndLocal === null ? null : addDays(today, daysOfCoverAmazonAndLocal),
+          daysOfCoverWithLocal,
+          estimatedOosDateWithLocal:
+            daysOfCoverWithLocal === null ? null : addDays(today, daysOfCoverWithLocal),
           status,
         };
       });

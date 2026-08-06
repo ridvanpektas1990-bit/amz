@@ -186,6 +186,7 @@ export function InventorySummarySection({
                     <div className="text-[11px] tabular-nums text-slate-500">
                       {nf.format(item.available)} Stk
                       {item.inbound > 0 ? ` · +${nf.format(item.inbound)} In` : ""}
+                      {(item.localQty || 0) > 0 ? ` · ${nf.format(item.localQty || 0)} lokal` : ""}
                     </div>
                   </div>
                 </button>

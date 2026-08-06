@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 import { loadCatalogMetadata } from "@/lib/amazon-catalog";
 import type { CartonSpecRow } from "@/lib/carton-specs";
+import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
+import { applyInboundLocalDeductions, loadLocalStockBySku } from "@/lib/local-stock-db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,6 +54,32 @@ type SpecRow = {
   updated_at: string | null;
 };
 
+async function ensureProductStub(
+  sb: ReturnType<typeof supabase>,
+  tenantId: string,
+  sellerSku: string,
+) {
+  const { data: product, error: productLookupError } = await sb
+    .from("inventory_products")
+    .select("seller_sku")
+    .eq("tenant_id", tenantId)
+    .eq("seller_sku", sellerSku)
+    .maybeSingle();
+  if (productLookupError) throw new Error(`Products: ${productLookupError.message}`);
+
+  if (!product) {
+    const { error: insertProductError } = await sb.from("inventory_products").insert({
+      tenant_id: tenantId,
+      seller_sku: sellerSku,
+    });
+    if (insertProductError) {
+      throw new Error(
+        `SKU fehlt in inventory_products und konnte nicht angelegt werden: ${insertProductError.message}`,
+      );
+    }
+  }
+}
+
 export async function GET(req: NextRequest) {
   try {
     const tenantId = tenantIdFromRequest(req);
@@ -79,6 +107,14 @@ export async function GET(req: NextRequest) {
       .map((row) => String(row.seller_sku || "").trim())
       .filter(Boolean);
 
+    const inboundBySku = new Map<string, number>();
+    for (const row of inventoryRows) {
+      const sku = String(row.seller_sku || "").trim();
+      if (!sku) continue;
+      inboundBySku.set(sku, Math.max(0, Number(row.inbound_total) || 0));
+    }
+    await applyInboundLocalDeductions(sb, tenantId, inboundBySku).catch(() => null);
+
     let specsQuery = sb
       .from("inventory_carton_specs")
       .select(
@@ -97,6 +133,10 @@ export async function GET(req: NextRequest) {
       specsBySku.set(String(row.seller_sku), row);
     }
 
+    const localBySku = await loadLocalStockBySku(sb, tenantId, skus.length ? skus : undefined).catch(
+      () => new Map(),
+    );
+
     const asins = inventoryRows.map((row) => String(row.asin || "").trim()).filter(Boolean);
     const catalog = await loadCatalogMetadata(req, asins, "A1PA6795UKMFR9").catch(() => new Map());
 
@@ -106,6 +146,7 @@ export async function GET(req: NextRequest) {
         const sku = String(row.seller_sku);
         const asin = row.asin ? String(row.asin) : null;
         const spec = specsBySku.get(sku);
+        const local = localBySku.get(sku);
         const meta = asin ? catalog.get(asin) : null;
         return {
           sellerSku: sku,
@@ -122,13 +163,20 @@ export async function GET(req: NextRequest) {
           productionTimeDays: spec?.production_time_days ?? null,
           shippingTimeDays: spec?.shipping_time_days ?? null,
           bufferTimeDays: spec?.buffer_time_days ?? null,
-          updatedAt: spec?.updated_at ?? null,
+          updatedAt: spec?.updated_at ?? local?.updatedAt ?? null,
           hasSpec: Boolean(spec),
+          localQty: local?.localQty ?? 0,
+          onOrderUnits: local?.onOrderUnits ?? 0,
+          transferLeadDays: local?.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS,
+          onOrderOrderedAt: local?.onOrderOrderedAt ?? null,
         };
       });
 
     if (skuFilter && items.length === 1) {
-      return NextResponse.json({ ok: true, item: items[0], items }, { headers: { "cache-control": "no-store" } });
+      return NextResponse.json(
+        { ok: true, item: items[0], items },
+        { headers: { "cache-control": "no-store" } },
+      );
     }
 
     return NextResponse.json({ ok: true, items }, { headers: { "cache-control": "no-store" } });
@@ -165,6 +213,14 @@ export async function PUT(req: NextRequest) {
     const cartonWCm = numOrNull(body?.cartonWCm ?? body?.carton_w_cm);
     const cartonHCm = numOrNull(body?.cartonHCm ?? body?.carton_h_cm);
     const cartonWeightKg = numOrNull(body?.cartonWeightKg ?? body?.carton_weight_kg);
+    const localQty = positiveIntOrNull(body?.localQty ?? body?.local_qty) ?? 0;
+    const onOrderUnits = positiveIntOrNull(body?.onOrderUnits ?? body?.on_order_units) ?? 0;
+    const transferLeadDays =
+      positiveIntOrNull(body?.transferLeadDays ?? body?.transfer_lead_days) ??
+      DEFAULT_TRANSFER_LEAD_DAYS;
+    const rawOrderedAt = String(body?.onOrderOrderedAt ?? body?.on_order_ordered_at ?? "").trim();
+    const onOrderOrderedAt =
+      onOrderUnits > 0 && /^\d{4}-\d{2}-\d{2}$/.test(rawOrderedAt) ? rawOrderedAt : null;
 
     for (const [label, value] of [
       ["cartonLenCm", cartonLenCm],
@@ -178,27 +234,7 @@ export async function PUT(req: NextRequest) {
     }
 
     const sb = supabase();
-
-    // Ensure product row exists for FK (create minimal stub if missing)
-    const { data: product, error: productLookupError } = await sb
-      .from("inventory_products")
-      .select("seller_sku")
-      .eq("tenant_id", tenantId)
-      .eq("seller_sku", sellerSku)
-      .maybeSingle();
-    if (productLookupError) throw new Error(`Products: ${productLookupError.message}`);
-
-    if (!product) {
-      const { error: insertProductError } = await sb.from("inventory_products").insert({
-        tenant_id: tenantId,
-        seller_sku: sellerSku,
-      });
-      if (insertProductError) {
-        throw new Error(
-          `SKU fehlt in inventory_products und konnte nicht angelegt werden: ${insertProductError.message}`,
-        );
-      }
-    }
+    await ensureProductStub(sb, tenantId, sellerSku);
 
     const payload = {
       tenant_id: tenantId,
@@ -224,6 +260,50 @@ export async function PUT(req: NextRequest) {
 
     if (error) throw new Error(error.message);
 
+    let lastInboundSeen: number | null = null;
+    const { data: invRow } = await sb
+      .from("vw_inventory_latest_per_asin_max")
+      .select("inbound_total")
+      .eq("tenant_id", tenantId)
+      .eq("marketplace", "DE")
+      .eq("seller_sku", sellerSku)
+      .maybeSingle();
+    if (invRow) {
+      lastInboundSeen = Math.max(
+        0,
+        Number((invRow as { inbound_total: number | null }).inbound_total) || 0,
+      );
+    }
+
+    const { data: existingLocal } = await sb
+      .from("inventory_local_stock")
+      .select("last_inbound_seen")
+      .eq("tenant_id", tenantId)
+      .eq("seller_sku", sellerSku)
+      .maybeSingle();
+
+    const localPayload = {
+      tenant_id: tenantId,
+      seller_sku: sellerSku,
+      local_qty: localQty,
+      on_order_units: onOrderUnits,
+      transfer_lead_days: Math.max(0, transferLeadDays),
+      on_order_ordered_at: onOrderOrderedAt,
+      last_inbound_seen:
+        existingLocal?.last_inbound_seen != null
+          ? existingLocal.last_inbound_seen
+          : lastInboundSeen,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: localData, error: localError } = await sb
+      .from("inventory_local_stock")
+      .upsert(localPayload, { onConflict: "tenant_id,seller_sku" })
+      .select("local_qty,on_order_units,transfer_lead_days,on_order_ordered_at,updated_at")
+      .single();
+
+    if (localError) throw new Error(`Local stock: ${localError.message}`);
+
     return NextResponse.json(
       {
         ok: true,
@@ -239,6 +319,14 @@ export async function PUT(req: NextRequest) {
           bufferTimeDays: data.buffer_time_days,
           updatedAt: data.updated_at,
           hasSpec: true,
+          localQty: Math.max(0, Number(localData.local_qty) || 0),
+          onOrderUnits: Math.max(0, Number(localData.on_order_units) || 0),
+          transferLeadDays:
+            Math.max(0, Number(localData.transfer_lead_days) || DEFAULT_TRANSFER_LEAD_DAYS) ||
+            DEFAULT_TRANSFER_LEAD_DAYS,
+          onOrderOrderedAt: localData.on_order_ordered_at
+            ? String(localData.on_order_ordered_at).slice(0, 10)
+            : null,
         },
       },
       { headers: { "cache-control": "no-store" } },

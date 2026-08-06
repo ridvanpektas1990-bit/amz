@@ -105,6 +105,7 @@ export function projectWeeklyOos({
   currentYearWeekTotals,
   recent30Units,
   recentTempoDays = 14,
+  delayedAdditions = [],
 }: {
   inventory: number;
   currentWeek: number;
@@ -113,9 +114,25 @@ export function projectWeeklyOos({
   recent30Units?: number;
   /** Days used as divisor for recent tempo (truncated for new listings). */
   recentTempoDays?: number;
+  /** Inject units after N weeks (e.g. local warehouse → Amazon transfer). */
+  delayedAdditions?: Array<{ weekOffset: number; units: number }>;
 }): WeeklyOosProjection {
+  const additions = delayedAdditions
+    .map((entry) => ({
+      weekOffset: Math.max(0, Math.round(Number(entry.weekOffset) || 0)),
+      units: Math.max(0, Math.floor(Number(entry.units) || 0)),
+    }))
+    .filter((entry) => entry.units > 0);
+  const lastAdditionWeek = additions.reduce((max, entry) => Math.max(max, entry.weekOffset), 0);
+
   let remaining = Math.max(0, Number(inventory) || 0);
-  if (remaining <= 0) return { weeks: 0, weekKw: currentWeek };
+  for (const entry of additions) {
+    if (entry.weekOffset === 0) remaining += entry.units;
+  }
+
+  if (remaining <= 0 && additions.every((entry) => entry.weekOffset === 0)) {
+    return { weeks: 0, weekKw: currentWeek };
+  }
 
   let weeks = 0;
   let hitWeekKw: number | null = null;
@@ -132,29 +149,37 @@ export function projectWeeklyOos({
       growthFactor: applyGrowth ? growthFactor : 1,
     }).demand;
 
+  const applyWeek = (week: number, seasonal: number, applyGrowth: boolean) => {
+    weeks += 1;
+    for (const entry of additions) {
+      if (entry.weekOffset === weeks) remaining += entry.units;
+    }
+    remaining -= demandFor(seasonal, applyGrowth);
+    if (remaining <= 0) {
+      remaining = 0;
+      const moreComing = additions.some((entry) => entry.weekOffset > weeks);
+      if (!moreComing) {
+        hitWeekKw = week;
+        return true;
+      }
+    }
+    return false;
+  };
+
   if (previousYearWeekTotals) {
     for (let week = currentWeek + 1; week <= 53; week++) {
-      remaining -= demandFor(previousYearWeekTotals.get(week) ?? 0, true);
-      weeks += 1;
-      if (remaining <= 0) {
-        hitWeekKw = week;
-        break;
-      }
+      if (applyWeek(week, previousYearWeekTotals.get(week) ?? 0, true)) break;
     }
   }
 
-  if (remaining > 0 && currentYearWeekTotals) {
+  if (hitWeekKw == null && (remaining > 0 || weeks < lastAdditionWeek) && currentYearWeekTotals) {
     for (let week = 1; week <= 53; week++) {
-      remaining -= demandFor(currentYearWeekTotals.get(week) ?? 0, false);
-      weeks += 1;
-      if (remaining <= 0) {
-        hitWeekKw = week;
-        break;
-      }
+      if (applyWeek(week, currentYearWeekTotals.get(week) ?? 0, false)) break;
     }
   }
 
-  if (remaining > 0) return { weeks: -1, weekKw: null };
+  if (hitWeekKw == null && remaining > 0) return { weeks: -1, weekKw: null };
+  if (hitWeekKw == null) return { weeks: -1, weekKw: null };
   return { weeks, weekKw: hitWeekKw };
 }
 
@@ -168,8 +193,9 @@ export type ReorderPlan = {
   newOosYear: number;
 };
 
-function isoWeekFromDateISO(dateISO: string): { isoYear: number; isoWeek: number } {
-  const d = new Date(`${dateISO}T00:00:00Z`);
+export function isoWeekFromDateISO(dateISO: string): { isoYear: number; isoWeek: number } {
+  const day = String(dateISO || "").slice(0, 10);
+  const d = new Date(`${day}T00:00:00Z`);
   const target = new Date(d.valueOf());
   const dayNr = (d.getUTCDay() + 6) % 7;
   target.setUTCDate(target.getUTCDate() - dayNr + 3);
@@ -178,6 +204,18 @@ function isoWeekFromDateISO(dateISO: string): { isoYear: number; isoWeek: number
   firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNr + 3);
   const week = 1 + Math.round((target.getTime() - firstThursday.getTime()) / 604800000);
   return { isoYear: target.getUTCFullYear(), isoWeek: week };
+}
+
+/** Map an OOS calendar date to the chart KW in `chartYear`, or null if outside that year. */
+export function chartWeekFromOosDate(
+  oosDateISO: string | null | undefined,
+  chartYear: number,
+): number | null {
+  const day = String(oosDateISO || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const { isoYear, isoWeek } = isoWeekFromDateISO(day);
+  if (isoYear !== chartYear || isoWeek < 1 || isoWeek > 53) return null;
+  return isoWeek;
 }
 
 function isoMondayOfWeek(isoYear: number, isoWeek: number): Date {
@@ -603,46 +641,88 @@ export type DailyOosProjection = {
 
 /**
  * Day-by-day cover used by /api/inventory/overview.
+ * Optional delayedAdditions inject units on a future day offset (e.g. local warehouse → Amazon).
  */
 export function projectDailyOos({
   inventory,
   todayDemand,
   demandForDayOffset,
   maxDays = 730,
+  delayedAdditions = [],
 }: {
   inventory: number;
   todayDemand: DailyDemandPoint;
   demandForDayOffset: (dayOffset: number) => DailyDemandPoint;
   maxDays?: number;
+  delayedAdditions?: Array<{ dayOffset: number; units: number }>;
 }): DailyOosProjection {
   const available = Math.max(0, Number(inventory) || 0);
+  const additions = delayedAdditions
+    .map((entry) => ({
+      dayOffset: Math.max(0, Math.round(Number(entry.dayOffset) || 0)),
+      units: Math.max(0, Math.floor(Number(entry.units) || 0)),
+    }))
+    .filter((entry) => entry.units > 0);
+  const lastAdditionDay = additions.reduce((max, entry) => Math.max(max, entry.dayOffset), 0);
+
   let remaining = available;
-  let daysOfCover: number | null = available <= 0 ? 0 : null;
+  let daysOfCover: number | null = null;
   let seasonalDays = 0;
   let fallbackDays = 0;
   let hasDemand = false;
 
-  if (available <= 0 && todayDemand.demand > 0) {
-    hasDemand = true;
-    if (todayDemand.seasonal) seasonalDays = 1;
-    else fallbackDays = 1;
+  if (available <= 0 && additions.length === 0) {
+    if (todayDemand.demand > 0) {
+      hasDemand = true;
+      if (todayDemand.seasonal) seasonalDays = 1;
+      else fallbackDays = 1;
+    }
+    return {
+      daysOfCover: 0,
+      forecastMethod: hasDemand ? (todayDemand.seasonal ? "seasonal" : "recent") : "none",
+      forecastDailySales: todayDemand.demand,
+    };
   }
 
-  for (let day = 0; day < maxDays && remaining > 0; day++) {
+  for (let day = 0; day < maxDays; day++) {
+    for (const entry of additions) {
+      if (entry.dayOffset === day) remaining += entry.units;
+    }
+
     const forecast = demandForDayOffset(day);
-    if (forecast.demand <= 0) continue;
+    if (forecast.demand <= 0) {
+      if (remaining <= 0 && day >= lastAdditionDay) break;
+      continue;
+    }
+
     hasDemand = true;
     if (forecast.seasonal) seasonalDays += 1;
     else fallbackDays += 1;
+
+    if (remaining <= 0) {
+      // Stockout gap while waiting for a later delayed addition.
+      const moreComing = additions.some((entry) => entry.dayOffset > day);
+      if (!moreComing) {
+        daysOfCover = daysOfCover ?? day;
+        break;
+      }
+      continue;
+    }
+
     remaining -= forecast.demand;
-    if (remaining <= 0) daysOfCover = day + 1;
+    if (remaining <= 0) {
+      remaining = 0;
+      daysOfCover = day + 1;
+      const moreComing = additions.some((entry) => entry.dayOffset > day);
+      if (!moreComing) break;
+    }
   }
 
   let forecastMethod: ForecastMethod = "none";
   if (seasonalDays > 0 && fallbackDays > 0) forecastMethod = "hybrid";
   else if (seasonalDays > 0) forecastMethod = "seasonal";
   else if (fallbackDays > 0) forecastMethod = "recent";
-  if (!hasDemand && available > 0) daysOfCover = null;
+  if (!hasDemand && (available > 0 || additions.length > 0)) daysOfCover = null;
 
   return {
     daysOfCover,
