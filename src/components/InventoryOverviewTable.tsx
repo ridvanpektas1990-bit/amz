@@ -310,8 +310,14 @@ export default function InventoryOverviewTable({
             <table className="min-w-[1100px] w-full border-collapse text-center text-[13px]">
               <thead className="sticky top-0 z-10">
                 <tr className="border-b border-slate-200/80 bg-white text-[10px] font-semibold tracking-wide text-slate-500">
-                  <th colSpan={5} className="px-2 py-1.5 text-left font-medium text-slate-400">
-                    Bestand
+                  <th colSpan={2} className="px-2 py-1.5 text-left font-medium text-slate-400">
+                    Produkt
+                  </th>
+                  <th
+                    colSpan={3}
+                    className="border-l border-slate-200 bg-white px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600"
+                  >
+                    Stückzahlen
                   </th>
                   <th
                     colSpan={2}
@@ -329,9 +335,11 @@ export default function InventoryOverviewTable({
                 <tr className="border-b border-slate-200 bg-slate-50/90 text-[10px] uppercase tracking-wide text-slate-500">
                   <th className="px-2 py-1.5 font-semibold">Produkt</th>
                   <th className="px-1 py-1.5 font-semibold">Status</th>
-                  <th className="px-1 py-1.5 font-semibold">Verf.</th>
-                  <th className="px-1 py-1.5 font-semibold">In</th>
-                  <th className="px-1 py-1.5 font-semibold">Lokal</th>
+                  <th className="border-l border-slate-200 bg-white px-1 py-1.5 font-semibold text-slate-600">
+                    Verf.
+                  </th>
+                  <th className="bg-white px-1 py-1.5 font-semibold text-slate-600">In</th>
+                  <th className="bg-white px-1 py-1.5 font-semibold text-slate-600">Lokal</th>
                   <th className="border-l border-slate-200 bg-slate-50 px-1.5 py-1.5 font-semibold text-slate-600">
                     Reichweite
                   </th>
@@ -409,18 +417,18 @@ export default function InventoryOverviewTable({
                           {health.shortLabel}
                         </span>
                       </td>
-                      <td className="px-1 py-1.5 font-semibold tabular-nums text-slate-900">
+                      <td className="border-l border-slate-200 bg-slate-50/20 px-1 py-1.5 font-semibold tabular-nums text-slate-900">
                         {nf.format(item.available)}
                       </td>
                       <td
-                        className={`px-1 py-1.5 tabular-nums ${
+                        className={`bg-slate-50/20 px-1 py-1.5 tabular-nums ${
                           item.inbound > 0 ? "font-semibold text-sky-700" : "text-slate-400"
                         }`}
                       >
                         {item.inbound > 0 ? `+${nf.format(item.inbound)}` : "0"}
                       </td>
                       <td
-                        className={`px-1 py-1.5 tabular-nums ${
+                        className={`bg-slate-50/20 px-1 py-1.5 tabular-nums ${
                           (item.localQty || 0) > 0 ? "font-semibold text-violet-700" : "text-slate-400"
                         }`}
                       >
@@ -477,8 +485,9 @@ export default function InventoryOverviewTable({
             )}
           </div>
           <div className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-500">
-            {visibleItems.length}/{counts.total} · Amazon-Lager = FBA (+ Zulauf) · Gesamtlager =
-            Amazon + Eigenlager · Produktbestellung = nächste Lieferanten-PO
+            {visibleItems.length}/{counts.total} · Stückzahlen = FBA Verf./Inbound + Eigenlager ·
+            Amazon-Lager = Reichweite FBA · Gesamtlager = Amazon + Eigenlager · Produktbestellung =
+            nächste Lieferanten-PO
           </div>
         </>
       )}

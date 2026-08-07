@@ -1,10 +1,13 @@
 /**
  * Recent-sales tempo for forecasts.
- * Uses the last N calendar days (default 14). Leading zero days inside that
- * window are dropped for brand-new listings.
+ * Uses the last N calendar days ending yesterday (sales are complete only
+ * through yesterday). Leading zero days inside that window are dropped for
+ * brand-new listings.
  */
 
 export const RECENT_TEMPO_LOOKBACK_DAYS = 14;
+/** Rolling units30 / activity window length (ending yesterday). */
+export const RECENT_SALES_UNITS30_DAYS = 30;
 
 export type RecentSalesTempo = {
   /** Units in the effective window. */
@@ -19,8 +22,45 @@ export type RecentSalesTempo = {
   truncated: boolean;
 };
 
+function berlinTodayISO(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Berlin",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function addDaysISO(dateISO: string, days: number): string {
+  const date = new Date(`${dateISO.slice(0, 10)}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 /**
- * @param dailyUnitsOldestFirst - one entry per calendar day, index 0 = oldest, last = today
+ * Last complete sales day (Berlin). Today is excluded — order data is incomplete.
+ */
+export function salesAsOfYesterdayISO(todayISO?: string): string {
+  const today = (todayISO || berlinTodayISO()).slice(0, 10);
+  return addDaysISO(today, -1);
+}
+
+/**
+ * Inclusive calendar window of `days` ending on `asOfISO`
+ * (default: yesterday). E.g. 30 → yesterday−29 … yesterday.
+ */
+export function recentSalesWindow(
+  days: number,
+  asOfISO?: string,
+): { startISO: string; endISO: string; days: number } {
+  const count = Math.max(1, Math.round(Number(days) || 1));
+  const endISO = (asOfISO || salesAsOfYesterdayISO()).slice(0, 10);
+  const startISO = addDaysISO(endISO, -(count - 1));
+  return { startISO, endISO, days: count };
+}
+
+/**
+ * @param dailyUnitsOldestFirst - one entry per calendar day, index 0 = oldest, last = as-of day (yesterday)
  * @param lookbackDays - use only the newest N days (default 14)
  */
 export function recentSalesTempoFromDaily(

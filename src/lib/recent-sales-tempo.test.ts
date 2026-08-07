@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   dailyUnitsSeriesFromMap,
   recentSalesTempoFromDaily,
+  recentSalesWindow,
   recentWeeklyDemand,
+  salesAsOfYesterdayISO,
   RECENT_TEMPO_LOOKBACK_DAYS,
 } from "./recent-sales-tempo.ts";
 
@@ -46,6 +48,18 @@ test("dailyUnitsSeriesFromMap fills missing days with zero", () => {
   ]);
   const series = dailyUnitsSeriesFromMap("2026-07-20", "2026-07-22", map);
   assert.deepEqual(series, [4, 0, 6]);
+});
+
+test("sales windows end yesterday (today excluded)", () => {
+  const asOf = salesAsOfYesterdayISO("2026-08-07");
+  assert.equal(asOf, "2026-08-06");
+  const w30 = recentSalesWindow(30, asOf);
+  assert.equal(w30.endISO, "2026-08-06");
+  assert.equal(w30.startISO, "2026-07-08");
+  assert.equal(w30.days, 30);
+  const w14 = recentSalesWindow(14, asOf);
+  assert.equal(w14.endISO, "2026-08-06");
+  assert.equal(w14.startISO, "2026-07-24");
 });
 
 test("recentWeeklyDemand uses active days as divisor", () => {

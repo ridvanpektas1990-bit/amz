@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
+import {
+  DEFAULT_AMAZON_TARGET_COVER_DAYS,
+  DEFAULT_TRANSFER_LEAD_DAYS,
+} from "@/lib/local-stock";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,13 +50,15 @@ async function ensureProductStubs(
 }
 
 /**
- * Apply universal lead-time / transfer defaults to all inventory SKUs for the tenant.
+ * Apply universal Stammdaten defaults to inventory SKUs.
  * Body (all fields optional; at least one required):
  * {
  *   transferLeadDays?: number,
+ *   amazonTargetCoverDays?: number,
  *   productionTimeDays?: number,
  *   shippingTimeDays?: number,
- *   bufferTimeDays?: number
+ *   bufferTimeDays?: number,
+ *   sellerSkus?: string[]
  * }
  */
 export async function POST(req: NextRequest) {
@@ -64,22 +70,28 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json().catch(() => ({}));
     const transferLeadDays = positiveIntOrNull(body?.transferLeadDays ?? body?.transfer_lead_days);
+    const amazonTargetRaw = positiveIntOrNull(
+      body?.amazonTargetCoverDays ?? body?.amazon_target_cover_days,
+    );
+    const amazonTargetCoverDays =
+      amazonTargetRaw != null ? Math.max(1, amazonTargetRaw) : null;
     const productionTimeDays = positiveIntOrNull(
       body?.productionTimeDays ?? body?.production_time_days,
     );
     const shippingTimeDays = positiveIntOrNull(body?.shippingTimeDays ?? body?.shipping_time_days);
     const bufferTimeDays = positiveIntOrNull(body?.bufferTimeDays ?? body?.buffer_time_days);
 
-    const applyTransfer = transferLeadDays != null;
+    const applyLocal =
+      transferLeadDays != null || amazonTargetCoverDays != null;
     const applyLead =
       productionTimeDays != null || shippingTimeDays != null || bufferTimeDays != null;
 
-    if (!applyTransfer && !applyLead) {
+    if (!applyLocal && !applyLead) {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "Mindestens eines von transferLeadDays, productionTimeDays, shippingTimeDays, bufferTimeDays angeben",
+            "Mindestens eines von transferLeadDays, amazonTargetCoverDays, productionTimeDays, shippingTimeDays, bufferTimeDays angeben",
         },
         { status: 400 },
       );
@@ -111,7 +123,6 @@ export async function POST(req: NextRequest) {
         ]
       : null;
 
-    // Optional sellerSkus scopes the bulk update (e.g. only active listings from the UI).
     const inventorySet = new Set(inventorySkus);
     const skus = (requestedSkus ?? inventorySkus).filter((sku) => inventorySet.has(sku));
 
@@ -124,12 +135,11 @@ export async function POST(req: NextRequest) {
     let updatedLocal = 0;
     let updatedSpecs = 0;
 
-    if (applyTransfer) {
-      const transfer = Math.max(0, transferLeadDays!);
+    if (applyLocal) {
       const { data: localRows } = await sb
         .from("inventory_local_stock")
         .select(
-          "seller_sku,local_qty,on_order_units,on_order_ordered_at,last_inbound_seen,transfer_lead_days",
+          "seller_sku,local_qty,on_order_units,on_order_ordered_at,last_inbound_seen,transfer_lead_days,amazon_target_cover_days",
         )
         .eq("tenant_id", tenantId)
         .in("seller_sku", skus);
@@ -143,6 +153,8 @@ export async function POST(req: NextRequest) {
             on_order_units: number | null;
             on_order_ordered_at: string | null;
             last_inbound_seen: number | null;
+            transfer_lead_days: number | null;
+            amazon_target_cover_days: number | null;
           },
         ]),
       );
@@ -154,7 +166,23 @@ export async function POST(req: NextRequest) {
           seller_sku,
           local_qty: Math.max(0, Math.floor(Number(existing?.local_qty) || 0)),
           on_order_units: Math.max(0, Math.floor(Number(existing?.on_order_units) || 0)),
-          transfer_lead_days: transfer,
+          transfer_lead_days:
+            transferLeadDays != null
+              ? Math.max(0, transferLeadDays)
+              : Math.max(
+                  0,
+                  Math.round(Number(existing?.transfer_lead_days) || DEFAULT_TRANSFER_LEAD_DAYS) ||
+                    DEFAULT_TRANSFER_LEAD_DAYS,
+                ),
+          amazon_target_cover_days:
+            amazonTargetCoverDays != null
+              ? amazonTargetCoverDays
+              : Math.max(
+                  1,
+                  Math.round(
+                    Number(existing?.amazon_target_cover_days) || DEFAULT_AMAZON_TARGET_COVER_DAYS,
+                  ) || DEFAULT_AMAZON_TARGET_COVER_DAYS,
+                ),
           on_order_ordered_at: existing?.on_order_ordered_at ?? null,
           last_inbound_seen: existing?.last_inbound_seen ?? null,
           updated_at: now,
@@ -237,7 +265,8 @@ export async function POST(req: NextRequest) {
         updatedLocal,
         updatedSpecs,
         applied: {
-          transferLeadDays: applyTransfer ? transferLeadDays : null,
+          transferLeadDays: transferLeadDays,
+          amazonTargetCoverDays: amazonTargetCoverDays,
           productionTimeDays: productionTimeDays,
           shippingTimeDays: shippingTimeDays,
           bufferTimeDays: bufferTimeDays,

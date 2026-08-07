@@ -3,7 +3,10 @@ import { createClient } from "@supabase/supabase-js";
 import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 import { loadCatalogMetadata } from "@/lib/amazon-catalog";
 import type { CartonSpecRow } from "@/lib/carton-specs";
-import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
+import {
+  DEFAULT_AMAZON_TARGET_COVER_DAYS,
+  DEFAULT_TRANSFER_LEAD_DAYS,
+} from "@/lib/local-stock";
 import { applyInboundLocalDeductions, loadLocalStockBySku } from "@/lib/local-stock-db";
 
 export const runtime = "nodejs";
@@ -168,6 +171,8 @@ export async function GET(req: NextRequest) {
           localQty: local?.localQty ?? 0,
           onOrderUnits: local?.onOrderUnits ?? 0,
           transferLeadDays: local?.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS,
+          amazonTargetCoverDays:
+            local?.amazonTargetCoverDays ?? DEFAULT_AMAZON_TARGET_COVER_DAYS,
           onOrderOrderedAt: local?.onOrderOrderedAt ?? null,
         };
       });
@@ -218,6 +223,11 @@ export async function PUT(req: NextRequest) {
     const transferLeadDays =
       positiveIntOrNull(body?.transferLeadDays ?? body?.transfer_lead_days) ??
       DEFAULT_TRANSFER_LEAD_DAYS;
+    const amazonTargetCoverDays = Math.max(
+      1,
+      positiveIntOrNull(body?.amazonTargetCoverDays ?? body?.amazon_target_cover_days) ??
+        DEFAULT_AMAZON_TARGET_COVER_DAYS,
+    );
     const rawOrderedAt = String(body?.onOrderOrderedAt ?? body?.on_order_ordered_at ?? "").trim();
     const onOrderOrderedAt =
       onOrderUnits > 0 && /^\d{4}-\d{2}-\d{2}$/.test(rawOrderedAt) ? rawOrderedAt : null;
@@ -288,6 +298,7 @@ export async function PUT(req: NextRequest) {
       local_qty: localQty,
       on_order_units: onOrderUnits,
       transfer_lead_days: Math.max(0, transferLeadDays),
+      amazon_target_cover_days: amazonTargetCoverDays,
       on_order_ordered_at: onOrderOrderedAt,
       last_inbound_seen:
         existingLocal?.last_inbound_seen != null
@@ -299,7 +310,9 @@ export async function PUT(req: NextRequest) {
     const { data: localData, error: localError } = await sb
       .from("inventory_local_stock")
       .upsert(localPayload, { onConflict: "tenant_id,seller_sku" })
-      .select("local_qty,on_order_units,transfer_lead_days,on_order_ordered_at,updated_at")
+      .select(
+        "local_qty,on_order_units,transfer_lead_days,amazon_target_cover_days,on_order_ordered_at,updated_at",
+      )
       .single();
 
     if (localError) throw new Error(`Local stock: ${localError.message}`);
@@ -324,6 +337,10 @@ export async function PUT(req: NextRequest) {
           transferLeadDays:
             Math.max(0, Number(localData.transfer_lead_days) || DEFAULT_TRANSFER_LEAD_DAYS) ||
             DEFAULT_TRANSFER_LEAD_DAYS,
+          amazonTargetCoverDays: Math.max(
+            1,
+            Number(localData.amazon_target_cover_days) || DEFAULT_AMAZON_TARGET_COVER_DAYS,
+          ),
           onOrderOrderedAt: localData.on_order_ordered_at
             ? String(localData.on_order_ordered_at).slice(0, 10)
             : null,

@@ -183,6 +183,12 @@ export function projectWeeklyOos({
   return { weeks, weekKw: hitWeekKw };
 }
 
+/** Convert weekly OOS walk result to days-of-cover (7d per week). `-1` → null (beyond horizon). */
+export function coverDaysFromWeeklyWeeks(weeks: number): number | null {
+  if (!Number.isFinite(weeks) || weeks < 0) return null;
+  return Math.max(0, Math.round(weeks)) * 7;
+}
+
 export type ReorderPlan = {
   weeksUntilOos: number;
   oosWeek: number;

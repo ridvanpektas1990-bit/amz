@@ -19,32 +19,13 @@ import {
   InventorySummarySection,
   InventoryTableSection,
 } from "@/components/InventoryMvpSection";
+import InventoryStockForecastSection from "@/components/InventoryStockForecastSection";
 import ShowInactiveListingsToggle from "@/components/ShowInactiveListingsToggle";
 import SyncStatusBanner from "@/components/SyncStatusBanner";
 import { useInventoryOverview } from "@/hooks/useInventoryOverview";
-import {
-  classifyReorderTiming,
-  leadTimeDaysFromSpec,
-  roundUpToCartons,
-  type CartonSpecRow,
-} from "@/lib/carton-specs";
-import {
-  classifyLocalStockAction,
-  DEFAULT_TRANSFER_LEAD_DAYS,
-  onOrderArrivalDelayDays,
-  openOrderCoverDays,
-  supplierDeliveryGap,
-  supplierOrderQtyAfterPipeline,
-} from "@/lib/local-stock";
-import {
-  classifyCoverageHealth,
-  coverageHealthTextClass,
-} from "@/lib/coverage-health";
 import { sortByDailySalesDesc } from "@/lib/listing-activity";
-import Link from "next/link";
 import {
   chartWeekFromOosDate,
-  planArrivalShipmentReorder,
 } from "@/lib/inventory-forecast";
 
 /* ===== Types ===== */
@@ -222,8 +203,6 @@ function YearChart({
   prevYearWeekTotals,
   currentIso,
   inventoryLeft,
-  inventoryOnHand,
-  inventoryInbound = 0,
   /** Same daily LY OOS dates as the cards (overview). */
   oosDateAmazonISO = null,
   oosDateGesamtISO = null,
@@ -236,8 +215,6 @@ function YearChart({
   prevYearWeekTotals?: Map<number, number> | null;
   currentIso?: { year: number; week: number } | null;
   inventoryLeft?: number | null;
-  inventoryOnHand?: number | null;
-  inventoryInbound?: number;
   oosDateAmazonISO?: string | null;
   oosDateGesamtISO?: string | null;
 }) {
@@ -447,9 +424,7 @@ function YearChart({
 
         {/* MITTE: Titel + Legende */}
         <div className="justify-self-center text-center">
-          <h2 className="text-lg font-semibold">
-            {year}{sku ? ` · ${sku}` : ""}
-          </h2>
+          <h2 className="text-2xl font-semibold tracking-tight text-slate-950">{year}</h2>
           {year === currentIso?.year && sku && typeof inventoryLeft === "number" && (
             <div className="mt-0.5 flex flex-wrap items-center justify-center gap-x-3 gap-y-0.5 text-[11px] leading-tight">
               <span className="font-medium text-orange-600">OOS1: Amazon Lager</span>
@@ -458,21 +433,16 @@ function YearChart({
           )}
         </div>
 
-        {/* RECHTS: Lager/OOS (inkl. Inbound) */}
+        {/* RECHTS: Amazon-Bestand inkl. Zulauf */}
         {year === currentIso?.year && sku && typeof inventoryLeft === "number" && (
           <div className="justify-self-end text-right">
             <div className="text-[11px] uppercase tracking-wide text-gray-500">
-              {inventoryInbound > 0 ? "Bestand inkl. Zulauf" : "Auf Lager"}
+              Amazon Lager Inkl. Zulauf
             </div>
             <div className="leading-none">
               <span className="text-3xl font-extrabold">{nf.format(inventoryLeft)}</span>
               <span className="ml-1 text-sm font-semibold text-gray-500">Stk</span>
             </div>
-            {inventoryInbound > 0 && typeof inventoryOnHand === "number" && (
-              <div className="mt-0.5 text-[11px] text-sky-700">
-                {nf.format(inventoryOnHand)} verfügbar · +{nf.format(inventoryInbound)} Inbound
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -492,7 +462,7 @@ function YearChart({
             <YAxis
               domain={[0, yMax]}
               tick={{ fontSize: 12 }}
-              label={{ value: `Stückzahl (${year})`, angle: -90, position: "insideLeft" }}
+              label={{ value: "Stückzahl", angle: -90, position: "insideLeft" }}
               allowDecimals={false}
             />
 
@@ -944,10 +914,6 @@ export default function DashboardPage() {
   const [currentYearData, setCurrentYearData] = useState<Point[] | null>(null);
   const [previousYearData, setPreviousYearData] = useState<Point[] | null>(null);
   const [olderYearData, setOlderYearData] = useState<Point[] | null>(null);
-  /** SKU the loaded week maps belong to ("" = all SKUs). Prevents cross-SKU reorder math. */
-  const [chartDataSku, setChartDataSku] = useState<string | null>(null);
-  const [currentRecent30Units, setCurrentRecent30Units] = useState(0);
-  const [currentRecentTempoDays, setCurrentRecentTempoDays] = useState(14);
   const [orderItemsSyncKey, setOrderItemsSyncKey] = useState(0);
 
   const [err, setErr] = useState<string | null>(null);
@@ -962,8 +928,6 @@ export default function DashboardPage() {
   const [showCurrentYearChart, setShowCurrentYearChart] = useState(true);
   const [showPreviousYearChart, setShowPreviousYearChart] = useState(true);
   const [showOlderYearChart, setShowOlderYearChart] = useState(false);
-  const [cartonSpec, setCartonSpec] = useState<CartonSpecRow | null>(null);
-  const [reorderDetailsOpen, setReorderDetailsOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -973,21 +937,6 @@ export default function DashboardPage() {
       // ignore
     }
   }, []);
-
-  useEffect(() => {
-    setReorderDetailsOpen(false);
-  }, [sku]);
-
-  useEffect(() => {
-    if (!reorderDetailsOpen) return;
-    const close = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest?.("[data-reorder-info]")) return;
-      setReorderDetailsOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [reorderDetailsOpen]);
 
   const inventory = useInventoryOverview(showInactiveListings);
 
@@ -1015,8 +964,6 @@ export default function DashboardPage() {
 
   // Inventory
   const [inventoryLeft, setInventoryLeft] = useState<number | null>(null);
-  const [inventoryInbound, setInventoryInbound] = useState(0);
-  const [inventoryOnHand, setInventoryOnHand] = useState<number | null>(null);
   const [inventoryErr, setInventoryErr] = useState<string | null>(null);
 
   // Heute als UTC-ISO
@@ -1061,12 +1008,9 @@ export default function DashboardPage() {
     (async () => {
       setLoading(true);
       setErr(null);
-      // Drop stale maps immediately so reorder cannot use another SKU's (or all-SKU) demand.
       setCurrentYearData(null);
       setPreviousYearData(null);
       setOlderYearData(null);
-      setChartDataSku(null);
-      setCurrentRecent30Units(0);
       try {
         const qs = sku ? `&sku=${encodeURIComponent(sku)}` : "";
         const [currentResponse, previousResponse, olderResponse] = await Promise.all([
@@ -1082,13 +1026,8 @@ export default function DashboardPage() {
         if (!previousResponse.ok || !previousJson.ok) throw new Error(previousJson?.error || `Fehler ${previousYear}`);
         if (!olderResponse.ok || !olderJson.ok) throw new Error(olderJson?.error || `Fehler ${olderYear}`);
         setCurrentYearData(currentJson.points as Point[]);
-        setCurrentRecent30Units(Math.max(0, Number(currentJson.recent30Units || 0)));
-        setCurrentRecentTempoDays(
-          Math.max(1, Math.round(Number(currentJson.recentTempoDays || 14)) || 14),
-        );
         setPreviousYearData(previousJson.points as Point[]);
         setOlderYearData(olderJson.points as Point[]);
-        setChartDataSku(sku);
       } catch (e: any) {
         if (!cancelled) setErr(e.message);
       } finally {
@@ -1151,20 +1090,16 @@ export default function DashboardPage() {
     })();
   }, [currentYear, previousYear, olderYear]);
 
-  // Inventory laden wenn SKU gesetzt (Available + Inbound für OOS/Nachbestellung)
+  // Inventory laden wenn SKU gesetzt (Amazon inkl. Zulauf für Chart-Badge)
   useEffect(() => {
     (async () => {
       setInventoryLeft(null);
-      setInventoryOnHand(null);
-      setInventoryInbound(0);
       setInventoryErr(null);
-      setCartonSpec(null);
       if (!sku) return;
       try {
-        const [invRes, specRes] = await Promise.all([
-          fetch(`/api/inventory?sku=${encodeURIComponent(sku)}`, { cache: "no-store" }),
-          fetch(`/api/inventory/carton-specs?sku=${encodeURIComponent(sku)}`, { cache: "no-store" }),
-        ]);
+        const invRes = await fetch(`/api/inventory?sku=${encodeURIComponent(sku)}`, {
+          cache: "no-store",
+        });
         const j = await invRes.json();
         if (!invRes.ok || !j.ok) throw new Error(j?.error || "Inventory-Fehler");
         const onHand =
@@ -1185,16 +1120,7 @@ export default function DashboardPage() {
             : onHand != null && Number.isFinite(onHand)
             ? Number(onHand) + inbound
             : null;
-        setInventoryOnHand(onHand != null && Number.isFinite(onHand) ? Number(onHand) : 0);
-        setInventoryInbound(inbound);
         setInventoryLeft(effective != null && Number.isFinite(effective) ? Number(effective) : 0);
-
-        if (specRes.ok) {
-          const specJson = await specRes.json();
-          if (specJson.ok && specJson.item) {
-            setCartonSpec(specJson.item as CartonSpecRow);
-          }
-        }
       } catch (e: any) {
         setInventoryErr(e?.message ?? "Unbekannter Fehler");
       }
@@ -1249,13 +1175,14 @@ export default function DashboardPage() {
     return { year: y, week: isoWeek };
   }, [todayISO]);
 
-  // Vorjahres-Map
+  // Vorjahres-Map (Chart-Tooltip / Seasonal-Hinweis)
   const previousYearMap = useMemo(() => {
     return previousYearData ? new Map<number, number>(previousYearData.map((p) => [p.isoWeek, p.total])) : null;
   }, [previousYearData]);
 
-  // Header-Zahlenformat
-  const nfTop = useMemo(() => new Intl.NumberFormat("de-DE"), []);
+  const currentYearMap = useMemo(() => {
+    return currentYearData ? new Map<number, number>(currentYearData.map((p) => [p.isoWeek, p.total])) : null;
+  }, [currentYearData]);
 
   const visibleSkus = useMemo(() => {
     const list = skus || [];
@@ -1263,293 +1190,10 @@ export default function DashboardPage() {
     return list.filter((option) => option.active !== false || option.value === sku);
   }, [skus, showInactiveListings, sku]);
 
-  // 2025 Wochen-Map
-  const currentYearMap = useMemo(() => {
-    return currentYearData ? new Map<number, number>(currentYearData.map((p) => [p.isoWeek, p.total || 0])) : null;
-  }, [currentYearData]);
-
-  const leadTimeDays = useMemo(() => leadTimeDaysFromSpec(cartonSpec), [cartonSpec]);
-
-  // Reorder: Timing aus Lieferzeit; Menge = Charge über Gesamtdauer + Puffer ab Ankunft (LY)
-  const reorderPlanTop = useMemo(() => {
-    if (!sku || inventoryLeft == null || leadTimeDays == null) return null;
-    if (!currentIso || !previousYearMap || !currentYearMap) return null;
-    // Only use week maps that were fetched for this exact SKU (never all-SKU totals).
-    if (chartDataSku !== sku) return null;
-
-    return planArrivalShipmentReorder({
-      inventory: inventoryLeft,
-      currentIsoYear: currentIso.year,
-      currentIsoWeek: currentIso.week,
-      previousYearWeekTotals: previousYearMap,
-      currentYearWeekTotals: currentYearMap,
-      recent30Units: currentRecent30Units,
-      recentTempoDays: currentRecentTempoDays,
-      leadTimeDays,
-      bufferDays: Math.max(0, Number(cartonSpec?.bufferTimeDays) || 0),
-    });
-  }, [
-    sku,
-    chartDataSku,
-    inventoryLeft,
-    currentIso,
-    previousYearMap,
-    currentYearMap,
-    currentRecent30Units,
-    currentRecentTempoDays,
-    leadTimeDays,
-    cartonSpec?.bufferTimeDays,
-  ]);
-
-  const daysUntilOos = useMemo(() => {
-    if (!sku) return null;
-    const fromOverview = inventory.data?.items.find((item) => item.sku === sku)?.daysOfCover;
-    if (typeof fromOverview === "number") return fromOverview;
-    if (!reorderPlanTop) return null;
-    if (reorderPlanTop.weeksUntilOos < 0) return 400;
-    return Math.max(0, reorderPlanTop.weeksUntilOos * 7);
-  }, [sku, inventory.data, reorderPlanTop]);
-
   const overviewSku = useMemo(
     () => inventory.data?.items.find((item) => item.sku === sku) || null,
     [inventory.data, sku],
   );
-
-  const localQty = overviewSku?.localQty ?? cartonSpec?.localQty ?? 0;
-  const onOrderUnits = overviewSku?.onOrderUnits ?? cartonSpec?.onOrderUnits ?? 0;
-  const transferLeadDays =
-    overviewSku?.transferLeadDays ?? cartonSpec?.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS;
-
-  const daysUntilOosPipeline = useMemo(() => {
-    if (!sku) return null;
-    const fromOverview = overviewSku?.daysOfCoverWithLocal;
-    if (typeof fromOverview === "number") return fromOverview;
-    return daysUntilOos;
-  }, [sku, overviewSku, daysUntilOos]);
-
-  const daysUntilOosAmazonAndLocal = useMemo(() => {
-    if (!sku) return null;
-    const fromOverview = overviewSku?.daysOfCoverAmazonAndLocal;
-    if (typeof fromOverview === "number") return fromOverview;
-    return daysUntilOos;
-  }, [sku, overviewSku, daysUntilOos]);
-
-  const onOrderOrderedAt =
-    overviewSku?.onOrderOrderedAt ?? cartonSpec?.onOrderOrderedAt ?? null;
-
-  const cartonOrder = useMemo(() => {
-    if (!reorderPlanTop) return null;
-    const adjusted = supplierOrderQtyAfterPipeline({
-      rawChargeQty: reorderPlanTop.reorderQty,
-      onOrderUnits,
-    });
-    return roundUpToCartons(adjusted, cartonSpec?.unitsPerCarton ?? null);
-  }, [reorderPlanTop, cartonSpec, onOrderUnits]);
-
-  const reorderTiming = useMemo(() => {
-    if (leadTimeDays == null) return null;
-    // Same horizon as Lieferverzug Bestellfrist (Amazon + Eigenlager).
-    return classifyReorderTiming(daysUntilOosAmazonAndLocal, leadTimeDays);
-  }, [daysUntilOosAmazonAndLocal, leadTimeDays]);
-
-  const stockAction = useMemo(() => {
-    if (leadTimeDays == null) return null;
-    return classifyLocalStockAction({
-      amazonDaysOfCover: daysUntilOos,
-      transferLeadDays,
-      localQty,
-      onOrderUnits,
-      supplierLeadDays: leadTimeDays,
-      dailyRate:
-        overviewSku?.forecastDailySales ||
-        overviewSku?.dailySales30 ||
-        (currentRecentTempoDays > 0 ? currentRecent30Units / currentRecentTempoDays : 0),
-      chargeCoverDays: reorderPlanTop?.coverDays ?? null,
-      amazonAndLocalDaysOfCover: daysUntilOosAmazonAndLocal,
-      pipelineDaysOfCover: daysUntilOosPipeline,
-      onOrderArrivesInDays: onOrderArrivalDelayDays({
-        orderedAtISO: onOrderUnits > 0 ? onOrderOrderedAt : null,
-        supplierLeadDays: leadTimeDays,
-      }),
-    });
-  }, [
-    leadTimeDays,
-    daysUntilOos,
-    transferLeadDays,
-    localQty,
-    onOrderUnits,
-    overviewSku,
-    currentRecent30Units,
-    currentRecentTempoDays,
-    reorderPlanTop?.coverDays,
-    daysUntilOosAmazonAndLocal,
-    daysUntilOosPipeline,
-    onOrderOrderedAt,
-  ]);
-
-  const dailyRateForCover = useMemo(() => {
-    return (
-      overviewSku?.forecastDailySales ||
-      overviewSku?.dailySales30 ||
-      (currentRecentTempoDays > 0 ? currentRecent30Units / currentRecentTempoDays : 0) ||
-      0
-    );
-  }, [overviewSku, currentRecent30Units, currentRecentTempoDays]);
-
-  const onOrderCoverDays = useMemo(
-    () => openOrderCoverDays(onOrderUnits, dailyRateForCover),
-    [onOrderUnits, dailyRateForCover],
-  );
-
-  /** Order qty even before chart LY maps are ready (same charge idea as board). */
-  const plannedSupplierOrderQty = useMemo(() => {
-    if (cartonOrder && cartonOrder.orderQty > 0) return cartonOrder.orderQty;
-    if (leadTimeDays == null || dailyRateForCover <= 0) return null;
-    const buffer = Math.max(0, Number(cartonSpec?.bufferTimeDays) || 0);
-    const coverDays = Math.max(1, leadTimeDays + buffer);
-    const raw = Math.max(0, Math.ceil(dailyRateForCover * coverDays));
-    const adjusted = supplierOrderQtyAfterPipeline({
-      rawChargeQty: raw,
-      onOrderUnits,
-    });
-    const rounded = roundUpToCartons(adjusted, cartonSpec?.unitsPerCarton ?? null);
-    return rounded.orderQty > 0 ? rounded.orderQty : null;
-  }, [cartonOrder, leadTimeDays, dailyRateForCover, cartonSpec, onOrderUnits]);
-
-  const deliveryGap = useMemo(() => {
-    if (leadTimeDays == null) return null;
-    const gap = supplierDeliveryGap({
-      oosDaysAmazonAndLocal: daysUntilOosAmazonAndLocal,
-      orderedAtISO: onOrderUnits > 0 ? onOrderOrderedAt : null,
-      supplierLeadDays: leadTimeDays,
-    });
-    if (!gap) return null;
-    // Same calendar date as chart OOS2 / overview (no re-derive drift)
-    const oosDateISO =
-      overviewSku?.estimatedOosDateAmazonAndLocal?.slice(0, 10) || gap.oosDateISO;
-    if (!oosDateISO || !gap.arrivalDateISO) {
-      return { ...gap, oosDateISO };
-    }
-    const oosMs = Date.parse(`${oosDateISO}T12:00:00Z`);
-    const arrivalMs = Date.parse(`${gap.arrivalDateISO}T12:00:00Z`);
-    if (!Number.isFinite(oosMs) || !Number.isFinite(arrivalMs)) {
-      return { ...gap, oosDateISO };
-    }
-    return {
-      ...gap,
-      oosDateISO,
-      gapDays: Math.round((arrivalMs - oosMs) / 86_400_000),
-    };
-  }, [
-    leadTimeDays,
-    daysUntilOosAmazonAndLocal,
-    onOrderUnits,
-    onOrderOrderedAt,
-    overviewSku?.estimatedOosDateAmazonAndLocal,
-  ]);
-
-  const deDate = (iso: string | null | undefined) => {
-    if (!iso) return "–";
-    return new Intl.DateTimeFormat("de-DE", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    }).format(new Date(`${iso.slice(0, 10)}T12:00:00Z`));
-  };
-
-  const inDaysLabel = (days: number) =>
-    days === 1 ? "in 1 Tag" : `in ${nfTop.format(Math.max(0, Math.round(days)))} Tagen`;
-
-  /** Same “Bestellfrist” number as Lieferverzug card. */
-  const daysUntilSupplierOrder = useMemo(() => {
-    if (onOrderUnits > 0 && deliveryGap?.hasOpenOrder) return null;
-    if (deliveryGap?.gapDays != null && !deliveryGap.hasOpenOrder) {
-      // gapDays = arrival − OOS; negative → days of buffer / Bestellfrist
-      return Math.round(-deliveryGap.gapDays);
-    }
-    if (reorderTiming?.daysUntilMustOrder != null) {
-      return Math.round(reorderTiming.daysUntilMustOrder);
-    }
-    return null;
-  }, [onOrderUnits, deliveryGap, reorderTiming]);
-
-  const daysUntilAmazonShipAction = useMemo(() => {
-    if (localQty <= 0 || daysUntilOos == null) return null;
-    return Math.round(daysUntilOos) - Math.round(transferLeadDays);
-  }, [localQty, daysUntilOos, transferLeadDays]);
-
-  const coverageHealth = useMemo(() => {
-    if (!sku || leadTimeDays == null) return null;
-    return classifyCoverageHealth({
-      amazonAvailable: inventoryLeft ?? 0,
-      amazonInbound: 0,
-      localQty,
-      onOrderUnits,
-      amazonDaysOfCover: daysUntilOos,
-      amazonAndLocalDaysOfCover: daysUntilOosAmazonAndLocal,
-      stockAction,
-      reorderTiming,
-      deliveryGapDays: deliveryGap?.gapDays ?? null,
-      daysUntilShip: daysUntilAmazonShipAction,
-      daysUntilOrder: daysUntilSupplierOrder,
-    });
-  }, [
-    sku,
-    leadTimeDays,
-    inventoryLeft,
-    localQty,
-    onOrderUnits,
-    daysUntilOos,
-    daysUntilOosAmazonAndLocal,
-    stockAction,
-    reorderTiming,
-    deliveryGap?.gapDays,
-    daysUntilAmazonShipAction,
-    daysUntilSupplierOrder,
-  ]);
-
-  const eigenesLagerLabel = (() => {
-    if (localQty <= 0) return "Leer";
-    if (daysUntilOos == null) return "nicht nötig";
-    const daysLeft = daysUntilAmazonShipAction ?? 0;
-    if (daysLeft <= 0) return "Amazon nachfüllen";
-    return `${inDaysLabel(daysLeft)} schicken`;
-  })();
-
-  const lieferantLabel = (() => {
-    if (onOrderUnits > 0) {
-      return `${nfTop.format(onOrderUnits)} Stück bereits bestellt`;
-    }
-    const qty =
-      plannedSupplierOrderQty != null && plannedSupplierOrderQty > 0
-        ? nfTop.format(plannedSupplierOrderQty)
-        : null;
-    const daysLeft = daysUntilSupplierOrder;
-
-    if (daysLeft == null) {
-      if (qty) return `${qty} Stück bestellen`;
-      return "nicht nötig";
-    }
-    if (daysLeft <= 0) {
-      return qty ? `${qty} Stück jetzt bestellen` : "jetzt bestellen";
-    }
-    return qty
-      ? `${inDaysLabel(daysLeft)} ${qty} Stück bestellen`
-      : `${inDaysLabel(daysLeft)} bestellen`;
-  })();
-
-  // Countdown events remain available for charts via event maps
-  // (header text intentionally minimal)
-
-  function focusSku(nextSku: string) {
-    setSku(nextSku);
-    // Nachbestellblock mounts after SKU state update — scroll on next ticks.
-    window.setTimeout(() => {
-      const target =
-        document.getElementById("nachbestellung") || document.getElementById("product-filter");
-      target?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 80);
-  }
 
   const chartToggleClass = (active: boolean) =>
     `rounded-full border px-3 py-1.5 text-xs font-medium transition ${
@@ -1596,306 +1240,10 @@ export default function DashboardPage() {
 
           {!sku && !skuLoading && !skuLoadErr && (
             <p className="mt-3 rounded-xl border border-slate-200/80 bg-white/70 px-3 py-2.5 text-sm text-slate-600 shadow-sm backdrop-blur-[2px]">
-              Noch kein Produkt gewählt. Nutze den Überblick unten oder wähle eine SKU, um die Nachbestellung zu sehen.
+              Noch kein Produkt gewählt. Nutze den Überblick unten oder wähle eine SKU.
             </p>
           )}
 
-          {sku && leadTimeDays == null && (
-            <div
-              id="nachbestellung"
-              className="mt-3 scroll-mt-4 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 shadow-sm"
-            >
-              Für die Nachbestellung fehlen Produktions- und Lieferdauer.{" "}
-              <Link href="/sku-stammdaten" className="font-semibold text-slate-900 underline">
-                In SKU-Stammdaten hinterlegen
-              </Link>
-            </div>
-          )}
-
-          {sku && leadTimeDays != null && reorderTiming && stockAction && (
-            <div
-              id="nachbestellung"
-              className="mt-3 scroll-mt-4 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm"
-            >
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                Wann handeln?{" "}
-                <span className="font-normal normal-case tracking-normal text-slate-400">
-                  (Lieferzeit {leadTimeDays} Tage
-                  {cartonSpec
-                    ? `: ${cartonSpec.productionTimeDays || 0} Prod. + ${cartonSpec.shippingTimeDays || 0} Versand`
-                    : ""}
-                  {localQty > 0 || onOrderUnits > 0
-                    ? ` · Transfer lokal ${transferLeadDays}T`
-                    : ""}
-                  )
-                </span>
-              </div>
-
-              <div className="mt-1">
-                <div
-                  className={`text-lg font-semibold ${
-                    coverageHealth
-                      ? coverageHealthTextClass[coverageHealth.tone]
-                      : stockAction === "order_supplier" &&
-                          (reorderTiming.status === "already_oos" ||
-                            reorderTiming.status === "too_late")
-                        ? "text-red-700"
-                        : stockAction === "order_supplier"
-                          ? "text-amber-800"
-                          : stockAction === "replenish_amazon"
-                            ? "text-sky-800"
-                            : stockAction === "awaiting_supplier"
-                              ? "text-violet-800"
-                              : "text-slate-950"
-                  }`}
-                >
-                  {coverageHealth?.label ?? "–"}
-                </div>
-                {stockAction === "replenish_amazon" && (
-                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    Amazon-Cover ca. {daysUntilOos == null ? "–" : nfTop.format(daysUntilOos)} Tage,
-                    lokaler Bestand {nfTop.format(localQty)} Stück (Transfer {transferLeadDays} Tage).
-                    Kein neues Lieferanten-PO nötig – aus lokalem Lager nach Amazon schicken.
-                  </p>
-                )}
-                {stockAction === "awaiting_supplier" && (
-                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    Offene Bestellung {nfTop.format(onOrderUnits)} Stück deckt die Lücke.
-                    Pipeline-Cover ca.{" "}
-                    {daysUntilOosPipeline == null ? "–" : `${nfTop.format(daysUntilOosPipeline)} Tage`}.
-                  </p>
-                )}
-                {stockAction === "order_supplier" && reorderTiming.status === "order_now" && (
-                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    Pipeline-OOS in ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tagen – genau die Lieferzeit.
-                    Heute ist der letzte sinnvolle Bestelltag beim Lieferanten.
-                  </p>
-                )}
-                {stockAction === "order_supplier" && reorderTiming.status === "ok" && (
-                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    Spätestens in {nfTop.format(reorderTiming.daysUntilMustOrder!)} Tagen beim Lieferanten
-                    bestellen. Pipeline-OOS in {nfTop.format(reorderTiming.daysUntilOos!)} Tagen
-                    {reorderPlanTop?.oosWeek != null
-                      ? ` (KW ${reorderPlanTop.oosWeek}/${reorderPlanTop.oosYear})`
-                      : ""}
-                    .
-                  </p>
-                )}
-                {stockAction === "ok" && (
-                  <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    {daysUntilOos != null && daysUntilOos <= 30
-                      ? `Amazon-Reichweite nur ca. ${nfTop.format(daysUntilOos)} Tage – trotzdem abgedeckt, weil Eigenlager/Lieferant die nächste Aktion rechtzeitig ermöglichen.`
-                      : "Pipeline reicht voraussichtlich über die Lieferzeit."}
-                  </p>
-                )}
-              </div>
-
-              <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 text-sm sm:grid-cols-3">
-                <div className="rounded-lg border border-sky-100 bg-sky-50/80 px-3 py-2.5">
-                  <div className="text-[11px] font-medium text-sky-700/80">Aktueller Stand</div>
-                  <div className="mt-0.5 font-semibold text-sky-950">
-                    {daysUntilOos === null
-                      ? "Kein Verkaufstempo"
-                      : daysUntilOos === 0
-                        ? "Amazon-Lager leer"
-                        : `Amazon-Reichweite ca. ${nfTop.format(daysUntilOos)} Tage`}
-                  </div>
-                  <div className="mt-1 space-y-1 text-xs leading-snug text-sky-900/75">
-                    <div>
-                      <span className="font-semibold tabular-nums text-sky-950">
-                        {inventoryLeft != null ? `${nfTop.format(Math.round(inventoryLeft))} Stück` : "–"}
-                      </span>
-                      <span className="text-sky-800/70">
-                        {" "}
-                        {inventoryInbound > 0
-                          ? "(Amazon-Lager + Zulauf unterwegs)"
-                          : "(Amazon-Lager)"}
-                      </span>
-                    </div>
-                    {localQty > 0 && (
-                      <div>
-                        <span className="font-semibold tabular-nums text-violet-900">
-                          {nfTop.format(localQty)} Stück
-                        </span>
-                        <span className="text-violet-800/75"> (Eigenes / externes Lager)</span>
-                      </div>
-                    )}
-                    {onOrderUnits > 0 && (
-                      <div>
-                        <span className="font-semibold tabular-nums text-violet-900">
-                          {nfTop.format(onOrderUnits)} Stück
-                        </span>
-                        <span className="text-violet-800/75">
-                          {" "}
-                          (beim Lieferanten bestellt
-                          {onOrderOrderedAt ? ` am ${deDate(onOrderOrderedAt)}` : ""}
-                          )
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <div
-                  className={`rounded-lg border px-3 py-2.5 ${
-                    deliveryGap?.gapDays != null && deliveryGap.gapDays > 0
-                      ? "border-rose-100 bg-rose-50/80"
-                      : "border-emerald-100 bg-emerald-50/80"
-                  }`}
-                >
-                  <div
-                    className={`text-[11px] font-medium ${
-                      deliveryGap?.gapDays != null && deliveryGap.gapDays > 0
-                        ? "text-rose-700/80"
-                        : "text-emerald-700/80"
-                    }`}
-                  >
-                    Lieferverzug
-                  </div>
-                  <div
-                    className={`mt-0.5 font-semibold tabular-nums ${
-                      deliveryGap?.gapDays != null && deliveryGap.gapDays > 0
-                        ? "text-rose-800"
-                        : "text-emerald-950"
-                    }`}
-                  >
-                    {deliveryGap?.gapDays == null
-                      ? "–"
-                      : deliveryGap.gapDays > 0
-                        ? `− ${nfTop.format(deliveryGap.gapDays)} Tage`
-                        : "kein Verzug"}
-                  </div>
-                  {deliveryGap?.arrivalDateISO && deliveryGap?.oosDateISO && (
-                    <div
-                      className={`mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs leading-snug ${
-                        deliveryGap.gapDays != null && deliveryGap.gapDays > 0
-                          ? "text-rose-800/75"
-                          : "text-emerald-800/75"
-                      }`}
-                    >
-                      <span>Ankunft:</span>
-                      <span>
-                        ~ {deDate(deliveryGap.arrivalDateISO)}
-                        {!deliveryGap.hasOpenOrder ? " (falls heute bestellt)" : ""}
-                      </span>
-                      <span>OOS:</span>
-                      <span>~ {deDate(deliveryGap.oosDateISO)}</span>
-                    </div>
-                  )}
-                  {deliveryGap?.gapDays != null && deliveryGap.gapDays > 0 && (
-                    <div className="mt-1.5 text-xs leading-snug text-rose-800/80">
-                      {nfTop.format(deliveryGap.gapDays)} Tage eventuell keine Sales, da die
-                      Lieferung nach OOS ankommt
-                    </div>
-                  )}
-                  {deliveryGap?.gapDays != null &&
-                    deliveryGap.gapDays < 0 &&
-                    !deliveryGap.hasOpenOrder && (
-                      <div className="mt-1.5 text-xs leading-snug text-emerald-800/70">
-                        noch {nfTop.format(Math.abs(deliveryGap.gapDays))} Tage bis Bestellfrist
-                      </div>
-                    )}
-                </div>
-                <div className="relative rounded-lg border border-teal-100 bg-teal-50/80 px-3 py-2.5">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="text-[11px] font-medium text-teal-700/80">Nachbestellung</div>
-                    <div className="relative shrink-0" data-reorder-info>
-                      <button
-                        type="button"
-                        aria-label="Rechnung und Nachbestellmenge erklären"
-                        aria-expanded={reorderDetailsOpen}
-                        onClick={() => setReorderDetailsOpen((open) => !open)}
-                        className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-teal-300/80 bg-white text-[11px] font-semibold text-teal-700 transition hover:border-teal-400 hover:bg-teal-50"
-                      >
-                        i
-                      </button>
-                      {reorderDetailsOpen && (
-                        <div className="absolute right-0 top-full z-40 mt-2 w-80 max-w-[min(20rem,calc(100vw-2rem))] space-y-2 rounded-xl border border-slate-200 bg-white p-3 text-left text-xs leading-relaxed text-slate-600 shadow-xl">
-                          <p className="font-semibold text-slate-800">Zwei getrennte Entscheidungen</p>
-                          <p>
-                            <strong className="text-slate-800">Eigenes Lager:</strong> Amazon aus dem externen /
-                            eigenen Lager nachfüllen (kurze Transferzeit). Nur nötig, wenn Amazon-Reichweite die
-                            Transferzeit unterschreitet und dort noch Bestand liegt.
-                          </p>
-                          <p>
-                            <strong className="text-slate-800">Lieferant:</strong> Neue Bestellung mit langer
-                            Lieferzeit. Nur nötig, wenn Amazon + eigenes Lager (+ offene Bestellung) die
-                            Lieferanten-Leadzeit nicht mehr decken.
-                          </p>
-                          <p>
-                            <strong className="text-slate-800">Menge:</strong> Vorjahresbedarf über{" "}
-                            {reorderPlanTop ? `${reorderPlanTop.coverDays} Tage` : "Charge-Zeitraum"}, abzüglich
-                            lokalem Bestand und offener Bestellung
-                            {cartonOrder && cartonOrder.orderQty > 0
-                              ? ` → ${nfTop.format(cartonOrder.orderQty)} Stück`
-                              : ""}
-                            .
-                          </p>
-                          <Link href="/sku-stammdaten" className="inline-block text-slate-600 underline">
-                            Stammdaten anpassen
-                          </Link>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="mt-1.5 space-y-1 text-xs leading-snug text-teal-950">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-teal-800/75">Eigenes Lager</span>
-                      <span className="font-semibold tabular-nums">{eigenesLagerLabel}</span>
-                    </div>
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className="text-teal-800/75">Lieferant</span>
-                      <span className="font-semibold tabular-nums">{lieferantLabel}</span>
-                    </div>
-                  </div>
-                  {onOrderUnits > 0 && (
-                    <div className="mt-1 space-y-0.5 text-[11px] leading-snug text-teal-800/75">
-                      {onOrderCoverDays != null ? (
-                        <div>
-                          Neue Lieferung reicht ~ {nfTop.format(onOrderCoverDays)} Tage ab Ankunft
-                        </div>
-                      ) : null}
-                      {stockAction === "order_supplier" &&
-                        cartonOrder &&
-                        cartonOrder.orderQty > 0 && (
-                          <div>Zusätzlich nachbestellen: {nfTop.format(cartonOrder.orderQty)} Stück</div>
-                        )}
-                    </div>
-                  )}
-                  {onOrderUnits <= 0 &&
-                    stockAction === "order_supplier" &&
-                    reorderPlanTop &&
-                    cartonOrder &&
-                    cartonOrder.orderQty > 0 && (
-                      <div className="mt-1 text-[11px] text-teal-800/75">
-                        Charge für {nfTop.format(reorderPlanTop.coverDays)} Tage
-                      </div>
-                    )}
-                  {localQty > 0 &&
-                    daysUntilOos != null &&
-                    daysUntilOos <= transferLeadDays && (
-                      <div className="mt-1 text-[11px] text-teal-800/75">
-                        {nfTop.format(localQty)} Stück im eigenen / externen Lager
-                      </div>
-                    )}
-                </div>
-              </div>
-
-              {stockAction === "order_supplier" && reorderTiming.status === "too_late" && (
-                <p className="mt-3 text-sm leading-relaxed text-slate-600">
-                  Pipeline reicht noch ca. {nfTop.format(reorderTiming.daysUntilOos!)} Tage. Bestellst du heute,
-                  fehlt die Ware {nfTop.format(Math.abs(reorderTiming.daysUntilMustOrder!))} Tage vor Ankunft –
-                  in dem Zeitraum kein Verkauf (laut Prognose).
-                </p>
-              )}
-
-              {stockAction === "order_supplier" && reorderTiming.status === "already_oos" && (
-                <p className="mt-3 text-sm leading-relaxed text-slate-600">
-                  Pipeline ist leer. Bestellst du heute, kommt Ware erst in {leadTimeDays} Tagen an – so lange
-                  kein Verkauf.
-                </p>
-              )}
-            </div>
-          )}
           {skuLoadErr && <div className="mt-2 text-sm text-red-600">{skuLoadErr}</div>}
           {inventoryErr && <div className="mt-2 text-sm text-red-600">{inventoryErr}</div>}
           </div>
@@ -1906,28 +1254,20 @@ export default function DashboardPage() {
           loading={inventory.loading}
           error={inventory.error}
           selectedSku={sku || undefined}
-          onSelectSku={focusSku}
+          onSelectSku={setSku}
         />
 
         <section className="mb-4 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm md:p-4">
-          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="text-base font-semibold text-slate-950">Jahresvergleich</h2>
-              <p className="text-xs text-slate-500">
-                {sku ? `Einheiten verkauft · ${sku}` : "Einheiten verkauft · alle Produkte"}
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className={chartToggleClass(showCurrentYearChart)} onClick={() => setShowCurrentYearChart((v) => !v)}>
-                {currentYear}
-              </button>
-              <button type="button" className={chartToggleClass(showPreviousYearChart)} onClick={() => setShowPreviousYearChart((v) => !v)}>
-                {previousYear}
-              </button>
-              <button type="button" className={chartToggleClass(showOlderYearChart)} onClick={() => setShowOlderYearChart((v) => !v)}>
-                {olderYear}
-              </button>
-            </div>
+          <div className="mb-3 flex flex-wrap justify-end gap-2">
+            <button type="button" className={chartToggleClass(showCurrentYearChart)} onClick={() => setShowCurrentYearChart((v) => !v)}>
+              {currentYear}
+            </button>
+            <button type="button" className={chartToggleClass(showPreviousYearChart)} onClick={() => setShowPreviousYearChart((v) => !v)}>
+              {previousYear}
+            </button>
+            <button type="button" className={chartToggleClass(showOlderYearChart)} onClick={() => setShowOlderYearChart((v) => !v)}>
+              {olderYear}
+            </button>
           </div>
 
           {loading && (
@@ -1957,8 +1297,6 @@ export default function DashboardPage() {
                   prevYearWeekTotals={previousYearMap}
                   currentIso={currentIso}
                   inventoryLeft={inventoryLeft}
-                  inventoryOnHand={inventoryOnHand}
-                  inventoryInbound={inventoryInbound}
                   oosDateAmazonISO={overviewSku?.estimatedOosDate ?? null}
                   oosDateGesamtISO={overviewSku?.estimatedOosDateAmazonAndLocal ?? null}
                 />
@@ -1992,6 +1330,15 @@ export default function DashboardPage() {
             </p>
           )}
         </section>
+
+        <InventoryStockForecastSection
+          sku={sku}
+          item={overviewSku}
+          previousYearWeekTotals={previousYearMap}
+          currentYearWeekTotals={currentYearMap}
+          todayISO={todayISO}
+          compact
+        />
 
         <InventoryTableSection
           data={inventory.data}

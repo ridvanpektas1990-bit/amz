@@ -35,6 +35,8 @@ export type CartonSpecRow = CartonSpec & {
   onOrderUnits: number;
   /** Days local warehouse → Amazon. */
   transferLeadDays: number;
+  /** Desired Amazon FBA cover days for ship-qty recommendations. */
+  amazonTargetCoverDays: number;
   /** Date open supplier PO was placed (YYYY-MM-DD). */
   onOrderOrderedAt: string | null;
 };

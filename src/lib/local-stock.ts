@@ -1,13 +1,43 @@
 export const DEFAULT_TRANSFER_LEAD_DAYS = 7;
 
+/** Default desired Amazon FBA cover used for ship-qty recommendations. */
+export const DEFAULT_AMAZON_TARGET_COVER_DAYS = 30;
+
 export type LocalStockRecord = {
   sellerSku: string;
   localQty: number;
   onOrderUnits: number;
   transferLeadDays: number;
+  amazonTargetCoverDays: number;
   lastInboundSeen: number | null;
   updatedAt: string | null;
 };
+
+/**
+ * Full Amazon replenishment charge for the target cover window (default 30 days).
+ * Does NOT subtract current FBA stock — each send is a full demand window.
+ * Uses week-ceil parity with the Nachbestellung planner. Capped at local qty.
+ */
+export function amazonShipQtyForTargetCover({
+  dailyRate,
+  targetCoverDays,
+  localQty,
+}: {
+  amazonAvailable?: number;
+  amazonInbound?: number;
+  dailyRate: number;
+  targetCoverDays: number;
+  localQty?: number;
+  recentTempoDays?: number;
+}): number {
+  const rate = Math.max(0, Number(dailyRate) || 0);
+  const target = Math.max(1, Math.round(Number(targetCoverDays) || DEFAULT_AMAZON_TARGET_COVER_DAYS));
+  if (rate <= 0) return 0;
+  const coverWeeks = Math.max(1, Math.ceil(target / 7));
+  const qty = Math.max(0, Math.ceil(coverWeeks * rate * 7));
+  if (localQty == null) return qty;
+  return Math.min(qty, Math.max(0, Math.floor(Number(localQty) || 0)));
+}
 
 export type InboundDeductionResult = {
   nextLocalQty: number;
@@ -118,22 +148,36 @@ export function classifyLocalStockAction({
     return Math.floor(units / rate);
   };
 
-  const baseCover = amazonCover == null ? 0 : amazonCover;
-  const amazonLocalEstimate = baseCover + coverDaysFromUnits(local);
-  const amazonLocalCover =
-    amazonAndLocalDaysOfCover != null && Number.isFinite(amazonAndLocalDaysOfCover)
-      ? Math.max(0, Math.round(amazonAndLocalDaysOfCover))
-      : pipelineDaysOfCover != null && Number.isFinite(pipelineDaysOfCover) && onOrder <= 0
-        ? Math.max(0, Math.round(pipelineDaysOfCover))
-        : amazonLocalEstimate;
+  // null cover = no OOS inside the forecast horizon (often slow movers with stock),
+  // not "0 Tage". Treating null as 0 falsely marks them as order_supplier.
+  let amazonLocalCover: number | null = null;
+  if (amazonAndLocalDaysOfCover != null && Number.isFinite(amazonAndLocalDaysOfCover)) {
+    amazonLocalCover = Math.max(0, Math.round(amazonAndLocalDaysOfCover));
+  } else if (
+    pipelineDaysOfCover != null &&
+    Number.isFinite(pipelineDaysOfCover) &&
+    onOrder <= 0
+  ) {
+    amazonLocalCover = Math.max(0, Math.round(pipelineDaysOfCover));
+  } else if (amazonCover != null) {
+    amazonLocalCover = amazonCover + coverDaysFromUnits(local);
+  } else if (rate > 0 && local > 0) {
+    // Amazon cover unknown/null, but local units can still be timed against lead.
+    amazonLocalCover = coverDaysFromUnits(local);
+  }
 
-  const shortVsLead = amazonLocalCover < supplierLeadDays;
+  const shortVsLead =
+    amazonLocalCover != null && amazonLocalCover < supplierLeadDays;
 
   const poArrival =
     onOrderArrivesInDays != null && Number.isFinite(onOrderArrivesInDays)
       ? Math.max(0, Math.round(onOrderArrivesInDays))
       : null;
-  const openPoArrivesBeforeOos = onOrder > 0 && poArrival != null && poArrival <= amazonLocalCover;
+  const openPoArrivesBeforeOos =
+    onOrder > 0 &&
+    poArrival != null &&
+    amazonLocalCover != null &&
+    poArrival <= amazonLocalCover;
 
   if (fbaNeedsReplenish && !shortVsLead) return "replenish_amazon";
   if (shortVsLead) {

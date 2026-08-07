@@ -5,6 +5,7 @@ import { loadOrderUnitRows } from "@/lib/amazon-order-units";
 import {
   dailyUnitsSeriesFromMap,
   recentSalesTempoFromDaily,
+  recentSalesWindow,
   RECENT_TEMPO_LOOKBACK_DAYS,
 } from "@/lib/recent-sales-tempo";
 
@@ -58,15 +59,10 @@ export async function GET(req: NextRequest) {
     const year = Number(url.searchParams.get("year") ?? new Date().getUTCFullYear());
     const debug = url.searchParams.get("debug") === "1";
     const sku = (url.searchParams.get("sku") || "").trim();
-    const todayISO = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Europe/Berlin",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date());
-    const recentStartDate = new Date(`${todayISO}T12:00:00Z`);
-    recentStartDate.setUTCDate(recentStartDate.getUTCDate() - (RECENT_TEMPO_LOOKBACK_DAYS - 1));
-    const recentStart = recentStartDate.toISOString().slice(0, 10);
+    // Tempo ends yesterday — today's order data is incomplete.
+    const tempoWindow = recentSalesWindow(RECENT_TEMPO_LOOKBACK_DAYS);
+    const recentStart = tempoWindow.startISO;
+    const recentEnd = tempoWindow.endISO;
 
     const sb = supa();
     const startStr = `${year - 1}-12-29`;
@@ -87,7 +83,7 @@ export async function GET(req: NextRequest) {
     let sumTotal = 0;
 
     for (const row of unitRows) {
-      if (row.dateISO >= recentStart && row.dateISO <= todayISO) {
+      if (row.dateISO >= recentStart && row.dateISO <= recentEnd) {
         recentByDate.set(row.dateISO, (recentByDate.get(row.dateISO) || 0) + row.quantity);
       }
       if (row.isoYear !== year) continue;
@@ -98,7 +94,7 @@ export async function GET(req: NextRequest) {
       if (monthIdx >= 0 && monthIdx < 12) byMonth[monthIdx] += row.quantity;
     }
 
-    const recentSeries = dailyUnitsSeriesFromMap(recentStart, todayISO, recentByDate);
+    const recentSeries = dailyUnitsSeriesFromMap(recentStart, recentEnd, recentByDate);
     const recentTempo = recentSalesTempoFromDaily(recentSeries);
     const recent30Units = recentTempo.units;
 
@@ -129,7 +125,12 @@ export async function GET(req: NextRequest) {
       recentTempoDays: recentTempo.activeDays,
       recentTempoTruncated: recentTempo.truncated,
       recentDailyRate: Number(recentTempo.dailyRate.toFixed(4)),
-      recent30Window: { start: recentStart, end: todayISO, days: RECENT_TEMPO_LOOKBACK_DAYS },
+      recent30Window: {
+        start: recentStart,
+        end: recentEnd,
+        days: RECENT_TEMPO_LOOKBACK_DAYS,
+        excludesToday: true,
+      },
       meta: debug
         ? {
             fetchedRows: unitRows.length,

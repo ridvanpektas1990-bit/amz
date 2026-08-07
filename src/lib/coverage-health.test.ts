@@ -186,6 +186,27 @@ test("missing lead is Daten fehlen", () => {
   assert.equal(result.shortLabel, "Daten fehlen");
 });
 
+test("overview: no sales tempo with stock stays Abgedeckt", () => {
+  const result = coverageHealthFromOverviewItem(
+    item({
+      sku: "IX-3V2G-GKCQ",
+      status: "no_sales",
+      available: 187,
+      localQty: 0,
+      onOrderUnits: 0,
+      transferLeadDays: 9,
+      supplierLeadDays: 95,
+      daysOfCover: null,
+      daysOfCoverAmazonAndLocal: null,
+      daysOfCoverWithLocal: null,
+      dailySales30: 0.2,
+      forecastDailySales: 0.2,
+    }),
+  );
+  assert.equal(result.health, "covered");
+  assert.equal(result.shortLabel, "Abgedeckt");
+});
+
 test("overview: Amazon knapp + lokal + offenes PO → Ins Amz Lager senden", () => {
   const result = coverageHealthFromOverviewItem(
     item({

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  amazonShipQtyForTargetCover,
   classifyLocalStockAction,
   computeInboundLocalDeduction,
   openOrderCoverDays,
@@ -63,6 +64,39 @@ test("order supplier when extended cover below supplier lead", () => {
       chargeCoverDays: 150,
     }),
     "order_supplier",
+  );
+});
+
+test("no sales tempo does not force supplier reorder", () => {
+  // Slow/no-sales SKUs: forecast leaves daysOfCover null — must stay ok, not order_supplier.
+  assert.equal(
+    classifyLocalStockAction({
+      amazonDaysOfCover: null,
+      transferLeadDays: 7,
+      localQty: 50,
+      onOrderUnits: 0,
+      supplierLeadDays: 90,
+      dailyRate: 0,
+      amazonAndLocalDaysOfCover: null,
+    }),
+    "ok",
+  );
+});
+
+test("null cover with tiny forecast rate does not force reorder", () => {
+  // IX-3V2G-GKCQ / E9-UUVX-5A25: stock lasts past forecast horizon → cover null,
+  // but residual dailyRate > 0 must not become cover=0.
+  assert.equal(
+    classifyLocalStockAction({
+      amazonDaysOfCover: null,
+      transferLeadDays: 9,
+      localQty: 0,
+      onOrderUnits: 0,
+      supplierLeadDays: 95,
+      dailyRate: 0.2,
+      amazonAndLocalDaysOfCover: null,
+    }),
+    "ok",
   );
 });
 
@@ -178,4 +212,36 @@ test("without order date, gap uses today + lead as hypothetical arrival", () => 
   assert.equal(gap.hasOpenOrder, false);
   assert.equal(gap.arrivalDateISO, "2026-08-30");
   assert.equal(gap.gapDays, -30); // 30 days buffer / Bestellfrist
+});
+
+test("amazon ship qty is full target-window charge, not FBA gap", () => {
+  // Ziel 30T ≈ 5 Wochen × 10/Tag × 7 = 350; ignore existing FBA stock
+  assert.equal(
+    amazonShipQtyForTargetCover({
+      amazonAvailable: 100,
+      amazonInbound: 0,
+      dailyRate: 10,
+      targetCoverDays: 30,
+      localQty: 500,
+    }),
+    350,
+  );
+  assert.equal(
+    amazonShipQtyForTargetCover({
+      amazonAvailable: 400,
+      dailyRate: 10,
+      targetCoverDays: 30,
+      localQty: 200,
+    }),
+    200, // capped at local
+  );
+  assert.equal(
+    amazonShipQtyForTargetCover({
+      amazonAvailable: 0,
+      dailyRate: 10,
+      targetCoverDays: 30,
+      localQty: 500,
+    }),
+    350,
+  );
 });

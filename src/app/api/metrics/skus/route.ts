@@ -3,6 +3,10 @@ import { createClient } from "@supabase/supabase-js";
 import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 import { loadCatalogMetadata, type CatalogMetadata } from "@/lib/amazon-catalog";
 import { dailySalesAverage, isActiveListing, sortByDailySalesDesc } from "@/lib/listing-activity";
+import {
+  recentSalesWindow,
+  RECENT_SALES_UNITS30_DAYS,
+} from "@/lib/recent-sales-tempo";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,21 +24,6 @@ function supa() {
   );
 }
 
-function berlinTodayISO(): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Berlin",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-}
-
-function addDaysISO(dateISO: string, days: number): string {
-  const date = new Date(`${dateISO}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
 export async function GET(req: NextRequest) {
   try {
     const tenantId = tenantIdFromRequest(req);
@@ -43,9 +32,12 @@ export async function GET(req: NextRequest) {
     }
 
     const sb = supa();
-    const today = berlinTodayISO();
-    const start30 = addDaysISO(today, -29);
-    const start90 = addDaysISO(today, -89);
+    // Sales complete only through yesterday.
+    const window30 = recentSalesWindow(RECENT_SALES_UNITS30_DAYS);
+    const window90 = recentSalesWindow(90);
+    const start30 = window30.startISO;
+    const endSales = window30.endISO;
+    const start90 = window90.startISO;
 
     const PAGE = 1000;
     type Agg = {
@@ -61,7 +53,7 @@ export async function GET(req: NextRequest) {
         .select("seller_sku,purchase_date_berlin,quantity_ordered,quantity_shipped")
         .eq("tenant_id", tenantId)
         .gte("purchase_date_berlin", start90)
-        .lte("purchase_date_berlin", today)
+        .lte("purchase_date_berlin", endSales)
         .range(from, from + PAGE - 1);
       if (error) throw new Error(`SKU sales page ${from}: ${error.message}`);
       if (!data?.length) break;
@@ -82,8 +74,8 @@ export async function GET(req: NextRequest) {
         );
         const agg = salesBySku.get(norm) || { rawSku: raw, units30: 0, units90: 0 };
         if (!salesBySku.has(norm)) agg.rawSku = raw;
-        if (date >= start90 && date <= today) agg.units90 += qty;
-        if (date >= start30 && date <= today) agg.units30 += qty;
+        if (date >= start90 && date <= endSales) agg.units90 += qty;
+        if (date >= start30 && date <= endSales) agg.units30 += qty;
         salesBySku.set(norm, agg);
       }
 

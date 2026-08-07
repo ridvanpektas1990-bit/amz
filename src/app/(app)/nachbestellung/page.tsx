@@ -41,7 +41,7 @@ export default function NachbestellungPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copiedSku, setCopiedSku] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"action" | "all_due">("action");
+  const [filter, setFilter] = useState<"action" | "all_due" | "all">("action");
   const [messageModal, setMessageModal] = useState<{
     sku: string;
     productName: string | null;
@@ -110,11 +110,13 @@ export default function NachbestellungPage() {
         cartonHCm: spec.cartonHCm,
       });
     }
-    return buildReorderBoardRows(overview?.items || [], map);
-  }, [overview, specs]);
+    return buildReorderBoardRows(overview?.items || [], map, {
+      includeAllActive: filter === "all",
+    });
+  }, [overview, specs, filter]);
 
   const visibleRows = useMemo(() => {
-    if (filter === "all_due") return rows;
+    if (filter === "all" || filter === "all_due") return rows;
     return rows.filter(
       (row) =>
         row.missingLeadTime ||
@@ -132,8 +134,8 @@ export default function NachbestellungPage() {
       productName: row.productName,
       sku: row.sku,
       asin: row.asin,
-      orderQty: row.orderQty,
-      cartons: row.cartons,
+      orderQty: row.messageOrderQty || row.orderQty,
+      cartons: row.messageCartons ?? row.cartons,
       unitsPerCarton: row.unitsPerCarton,
       cartonLenCm: row.cartonLenCm,
       cartonWCm: row.cartonWCm,
@@ -145,13 +147,15 @@ export default function NachbestellungPage() {
   function openMessageModal(row: ReorderBoardRow) {
     if (!row.supplierMessage) return;
     const lang: SupplierMessageLang = "de";
+    const orderQty = row.messageOrderQty || row.orderQty;
+    const cartons = row.messageCartons ?? row.cartons;
     setCopiedSku(null);
     setMessageModal({
       sku: row.sku,
       productName: row.productName,
       asin: row.asin,
-      orderQty: row.orderQty,
-      cartons: row.cartons,
+      orderQty,
+      cartons,
       unitsPerCarton: row.unitsPerCarton,
       cartonLenCm: row.cartonLenCm,
       cartonWCm: row.cartonWCm,
@@ -218,7 +222,7 @@ export default function NachbestellungPage() {
         <div>
           <h1 className="text-lg font-semibold tracking-tight text-slate-950 md:text-xl">Nachbestellung</h1>
           <p className="mt-0.5 text-sm text-slate-500">
-            SKUs mit Bestellbedarf · lokaler Bestand · Lieferanten-PO
+            Bestellmengen · lokaler Bestand · Lieferanten-PO · optional alle aktiven SKUs
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -240,6 +244,15 @@ export default function NachbestellungPage() {
               }`}
             >
               inkl. nächste 21 Tage
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilter("all")}
+              className={`rounded-full px-3 py-1.5 font-medium transition ${
+                filter === "all" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"
+              }`}
+            >
+              Alle Produkte
             </button>
           </div>
           <button
@@ -305,13 +318,30 @@ export default function NachbestellungPage() {
 
           {visibleRows.length === 0 ? (
             <div className="rounded-2xl border border-slate-200 bg-white px-4 py-10 text-center shadow-sm">
-              <p className="text-sm font-medium text-slate-900">Kein akuter Bestellbedarf</p>
-              <p className="mt-1 text-sm text-slate-500">
-                Im gewählten Filter gibt es gerade keine SKUs mit Bestelllücke.
+              <p className="text-sm font-medium text-slate-900">
+                {filter === "all" ? "Keine aktiven Produkte" : "Kein akuter Bestellbedarf"}
               </p>
-              <Link href="/dashboard" className="mt-3 inline-block text-sm font-medium text-slate-900 underline">
-                Zum Dashboard
-              </Link>
+              <p className="mt-1 text-sm text-slate-500">
+                {filter === "all"
+                  ? "Es sind keine aktiven Listings vorhanden."
+                  : "Im gewählten Filter gibt es gerade keine SKUs mit Bestelllücke. Mit „Alle Produkte“ kannst du trotzdem vorzeitig bestellen."}
+              </p>
+              {filter !== "all" ? (
+                <button
+                  type="button"
+                  onClick={() => setFilter("all")}
+                  className="mt-3 inline-block text-sm font-medium text-slate-900 underline"
+                >
+                  Alle Produkte anzeigen
+                </button>
+              ) : (
+                <Link
+                  href="/dashboard"
+                  className="mt-3 inline-block text-sm font-medium text-slate-900 underline"
+                >
+                  Zum Dashboard
+                </Link>
+              )}
             </div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -374,7 +404,9 @@ export default function NachbestellungPage() {
                                   ? "bg-sky-50 text-sky-800 ring-sky-200"
                                   : row.action === "awaiting_supplier"
                                     ? "bg-violet-50 text-violet-800 ring-violet-200"
-                                    : "bg-amber-50 text-amber-900 ring-amber-200"
+                                    : row.action === "ok"
+                                      ? "bg-emerald-50 text-emerald-800 ring-emerald-200"
+                                      : "bg-amber-50 text-amber-900 ring-amber-200"
                             }`}
                           >
                             {actionLabel(row.action)}
@@ -414,19 +446,25 @@ export default function NachbestellungPage() {
                           ) : (
                             <>
                               <div className="font-semibold tabular-nums text-teal-900">
-                                {nf.format(row.orderQty)}
+                                {nf.format(row.messageOrderQty || row.orderQty)}
                               </div>
-                              {row.rounded && (
+                              {row.orderQty === 0 &&
+                              row.messageOrderQty > 0 &&
+                              row.onOrderUnits > 0 ? (
+                                <div className="text-[10px] text-slate-500">
+                                  netto 0 · {nf.format(row.onOrderUnits)} bestellt
+                                </div>
+                              ) : row.rounded ? (
                                 <div className="text-[10px] text-slate-500">
                                   roh {nf.format(row.rawQty)}
                                 </div>
-                              )}
+                              ) : null}
                             </>
                           )}
                         </td>
                         <td className="px-2 py-2.5 text-right tabular-nums text-slate-700">
-                          {row.cartons != null && row.unitsPerCarton
-                            ? `${nf.format(row.cartons)} × ${nf.format(row.unitsPerCarton)}`
+                          {(row.messageCartons ?? row.cartons) != null && row.unitsPerCarton
+                            ? `${nf.format(row.messageCartons ?? row.cartons!)} × ${nf.format(row.unitsPerCarton)}`
                             : "–"}
                         </td>
                         <td className="px-3 py-2.5">
@@ -438,16 +476,8 @@ export default function NachbestellungPage() {
                               >
                                 Stammdaten
                               </Link>
-                            ) : row.action === "order_supplier" ? (
-                              <button
-                                type="button"
-                                disabled={!row.supplierMessage}
-                                onClick={() => openMessageModal(row)}
-                                className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40"
-                              >
-                                Text kopieren
-                              </button>
-                            ) : row.action === "replenish_amazon" ? (
+                            ) : null}
+                            {row.action === "replenish_amazon" ? (
                               <Link
                                 href="/sku-stammdaten"
                                 className="rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-xs font-medium text-sky-950 hover:bg-sky-100"
@@ -455,12 +485,15 @@ export default function NachbestellungPage() {
                                 Lokal prüfen
                               </Link>
                             ) : null}
-                            <Link
-                              href={`/dashboard?sku=${encodeURIComponent(row.sku)}`}
-                              className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                            >
-                              Dashboard
-                            </Link>
+                            {row.supplierMessage ? (
+                              <button
+                                type="button"
+                                onClick={() => openMessageModal(row)}
+                                className="rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-slate-700"
+                              >
+                                Text kopieren
+                              </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>

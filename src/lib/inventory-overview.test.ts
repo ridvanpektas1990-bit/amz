@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  actionPlanWhenLabel,
+  buildInventoryActionPlan,
   classifyStockStatus,
   daysUntilAmazonShip,
   daysUntilSupplierOrderDeadline,
@@ -10,6 +12,8 @@ import {
   inventoryActionHint,
   inventoryStatusLabel,
   selectOosRiskItems,
+  suggestedAmazonShipQty,
+  suggestedSupplierOrderQty,
   summarizeInventoryKpis,
   type InventoryOverviewItem,
 } from "./inventory-overview.ts";
@@ -29,10 +33,15 @@ function item(partial: Partial<InventoryOverviewItem> & Pick<InventoryOverviewIt
     inbound: partial.inbound ?? 0,
     localQty: partial.localQty ?? 0,
     onOrderUnits: partial.onOrderUnits ?? 0,
+    onOrderOrderedAt: partial.onOrderOrderedAt ?? null,
     transferLeadDays: partial.transferLeadDays ?? 7,
+    amazonTargetCoverDays: partial.amazonTargetCoverDays ?? 30,
+    bufferTimeDays: partial.bufferTimeDays ?? null,
+    unitsPerCarton: partial.unitsPerCarton ?? null,
     units30: partial.units30 ?? 0,
     units90: partial.units90 ?? 0,
     dailySales30: partial.dailySales30 ?? 0,
+    recentTempoDays: partial.recentTempoDays ?? 14,
     forecastDailySales: partial.forecastDailySales ?? 0,
     forecastMethod: "recent",
     growthFactor: 1,
@@ -141,6 +150,187 @@ test("action hints are actionable for OOS and short cover", () => {
     inventoryActionHint(item({ sku: "y", status: "critical", daysOfCover: 10 })),
     /Jetzt bestellen/,
   );
+});
+
+test("action plan sorts upcoming ship/order todos by due date", () => {
+  const plan = buildInventoryActionPlan(
+    [
+      item({
+        sku: "later-order",
+        productName: "Produkt Y",
+        status: "healthy",
+        available: 80,
+        supplierLeadDays: 40,
+        bufferTimeDays: 0,
+        forecastDailySales: 2,
+        dailySales30: 2,
+        units30: 28,
+        recentTempoDays: 14,
+        daysOfCover: 80,
+        daysOfCoverAmazonAndLocal: 46,
+      }),
+      item({
+        sku: "soon-ship",
+        productName: "Produkt X",
+        status: "critical",
+        available: 20,
+        inbound: 0,
+        localQty: 100,
+        transferLeadDays: 7,
+        amazonTargetCoverDays: 30,
+        forecastDailySales: 2,
+        dailySales30: 2,
+        units30: 28,
+        recentTempoDays: 14,
+        daysOfCover: 9,
+        daysOfCoverAmazonAndLocal: 120,
+        supplierLeadDays: 90,
+      }),
+      item({
+        sku: "far",
+        status: "healthy",
+        available: 500,
+        localQty: 50,
+        transferLeadDays: 7,
+        supplierLeadDays: 40,
+        daysOfCover: 100,
+        daysOfCoverAmazonAndLocal: 120,
+        units30: 50,
+        dailySales30: 1,
+      }),
+      item({
+        sku: "empty",
+        productName: "Leer",
+        status: "out",
+        available: 0,
+        supplierLeadDays: 90,
+        bufferTimeDays: 60,
+        forecastDailySales: 1,
+        dailySales30: 1,
+        units30: 14,
+        recentTempoDays: 14,
+        unitsPerCarton: 32,
+      }),
+      // Phantom / placeholder — must not appear even with fake local stock
+      item({
+        sku: "15-FBFB-FBFB",
+        status: "critical",
+        available: 0,
+        localQty: 50,
+        transferLeadDays: 7,
+        daysOfCover: 0,
+        units30: 10,
+        units90: 10,
+        dailySales30: 0.5,
+        forecastDailySales: 0.5,
+      }),
+      item({
+        sku: "dead-local",
+        status: "critical",
+        available: 0,
+        localQty: 50,
+        transferLeadDays: 7,
+        daysOfCover: 0,
+        units30: 0,
+        units90: 0,
+        dailySales30: 0,
+        forecastDailySales: 0,
+      }),
+    ],
+    { horizonDays: 21 },
+  );
+
+  assert.deepEqual(
+    plan.map((row) => `${row.daysUntil}:${row.kind}:${row.sku}`),
+    ["0:sold_out:empty", "2:ship_amazon:soon-ship", "6:order_supplier:later-order"],
+  );
+  assert.ok(!plan.some((row) => row.sku === "15-FBFB-FBFB"));
+  assert.ok(!plan.some((row) => row.sku === "dead-local"));
+  assert.equal(actionPlanWhenLabel(2), "in 2 Tagen");
+  assert.equal(plan[1]!.actionLabel, "Amz Lager senden");
+  // Volle Ziel-Charge: 5 Wochen × 2/Tag × 7 = 70 (kein Abzug FBA)
+  assert.equal(plan[1]!.qtySuggested, 70);
+  assert.equal(plan[1]!.qtyBasis, "Ziel 30 T");
+  assert.equal(plan[2]!.actionLabel, "Lieferant nachbestellen");
+  // Wochen-Charge: ceil(40/7)=6 Wochen × (2*7)=14 → 84
+  assert.equal(plan[2]!.qtySuggested, 84);
+  // empty: lead 90+60=150 → ceil(150/7)=22 Wochen × 7 = 154 → round 5*32=160
+  assert.equal(plan[0]!.qtySuggested, 160);
+});
+
+test("supplier order qty matches Nachbestellung weekly charge for JB-YNGC-UTVY", () => {
+  const qty = suggestedSupplierOrderQty(
+    item({
+      sku: "JB-YNGC-UTVY",
+      status: "healthy",
+      available: 85,
+      inbound: 240,
+      localQty: 576,
+      supplierLeadDays: 95,
+      bufferTimeDays: 60,
+      unitsPerCarton: 48,
+      forecastDailySales: 9.14,
+      dailySales30: 9.14,
+      recentTempoDays: 14,
+      daysOfCover: 36,
+      daysOfCoverAmazonAndLocal: 99,
+    }),
+    { todayISO: "2026-08-07" },
+  );
+  assert.equal(qty, 1488);
+});
+
+test("amazon ship qty is full LY/tempo target window, not FBA gap (M0-style)", () => {
+  const qty = suggestedAmazonShipQty(
+    item({
+      sku: "M0-V6TY-PMMJ",
+      status: "healthy",
+      available: 276,
+      inbound: 36,
+      localQty: 3456,
+      amazonTargetCoverDays: 30,
+      unitsPerCarton: 36,
+      forecastDailySales: 11.7,
+      dailySales30: 11.21,
+      recentTempoDays: 14,
+      growthFactor: 1.148,
+      daysOfCover: 27,
+      transferLeadDays: 9,
+      supplierLeadDays: 95,
+    }),
+    { todayISO: "2026-08-07" },
+  );
+  // 5 weeks × 11.7/day × 7 ≈ 409.5 → 410 → round to 12×36 = 432
+  assert.equal(qty, 432);
+  assert.ok(qty > 100, "must not be tiny FBA-gap like 39");
+});
+
+test("action plan skips stockout when PO is open; keeps Amz ship if local exists", () => {
+  // UI-JKHV-J3CU-style: open supplier PO + Lieferverzug math, but actionable todo = ship only
+  const plan = buildInventoryActionPlan(
+    [
+      item({
+        sku: "UI-JKHV-J3CU",
+        status: "healthy",
+        available: 231,
+        inbound: 480,
+        localQty: 672,
+        onOrderUnits: 3120,
+        onOrderOrderedAt: "2026-06-25",
+        transferLeadDays: 9,
+        supplierLeadDays: 95,
+        daysOfCover: 24,
+        daysOfCoverAmazonAndLocal: 47,
+        daysOfCoverWithLocal: 198,
+        units30: 100,
+        dailySales30: 3,
+      }),
+    ],
+    { horizonDays: 21 },
+  );
+  assert.equal(plan.some((row) => row.kind === "ship_amazon"), true);
+  assert.equal(plan.some((row) => row.actionLabel === "Stockout prüfen"), false);
+  assert.equal(plan.some((row) => row.kind === "order_supplier"), false);
 });
 
 test("inbound extends cover and softens status / hints", () => {

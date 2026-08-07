@@ -4,9 +4,12 @@ import { tenantIdFromRequest } from "@/lib/amazon-tenant-cookie";
 import { loadCatalogMetadata, type CatalogMetadata } from "@/lib/amazon-catalog";
 import {
   FORECAST_GROWTH_PRIOR_UNITS,
-  calculatePositiveGrowthFactor,
-  chooseForecastDemand,
-  projectDailyOos,
+  coverDaysFromWeeklyWeeks,
+  isoWeekFromDateISO,
+  planArrivalShipmentReorder,
+  projectWeeklyOos,
+  weeklyGrowthFactorFromMaps,
+  ytdUnitsBeforeWeek,
 } from "@/lib/inventory-forecast";
 import {
   classifyStockStatus,
@@ -16,10 +19,18 @@ import { loadSkuSalesLinkedToOrders } from "@/lib/amazon-order-units";
 import {
   dailyUnitsSeriesFromMap,
   recentSalesTempoFromDaily,
+  recentSalesWindow,
+  salesAsOfYesterdayISO,
+  RECENT_SALES_UNITS30_DAYS,
   RECENT_TEMPO_LOOKBACK_DAYS,
 } from "@/lib/recent-sales-tempo";
-import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
+import {
+  DEFAULT_AMAZON_TARGET_COVER_DAYS,
+  DEFAULT_TRANSFER_LEAD_DAYS,
+  supplierOrderQtyAfterPipeline,
+} from "@/lib/local-stock";
 import { applyInboundLocalDeductions, loadLocalStockBySku } from "@/lib/local-stock-db";
+import { roundUpToCartons } from "@/lib/carton-specs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,23 +89,10 @@ function number(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function monthKey(dateISO: string): string {
-  return dateISO.slice(0, 7);
-}
-
-function daysInMonth(year: number, monthIndex: number): number {
-  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
-}
-
-function previousYearDate(date: Date): Date {
-  const previous = new Date(date);
-  previous.setUTCFullYear(previous.getUTCFullYear() - 1);
-  return previous;
-}
-
-function isCompleteMonth(year: number, monthIndex: number, todayISO: string): boolean {
-  const end = new Date(Date.UTC(year, monthIndex + 1, 0));
-  return isoDate(end) < todayISO;
+function weeksCeilFromDays(days: number): number {
+  const value = Math.max(0, Number(days) || 0);
+  if (value <= 0) return 0;
+  return Math.ceil(value / 7);
 }
 
 export async function GET(req: NextRequest) {
@@ -107,25 +105,18 @@ export async function GET(req: NextRequest) {
     const marketplace = (new URL(req.url).searchParams.get("marketplace") || "DE").trim().toUpperCase();
     const sb = supabase();
     const today = berlinDate();
-    const todayDate = new Date(`${today}T12:00:00Z`);
-    const currentYear = todayDate.getUTCFullYear();
-    const start30 = new Date(`${today}T00:00:00Z`);
-    start30.setUTCDate(start30.getUTCDate() - 29);
-    const startTempo = new Date(`${today}T00:00:00Z`);
-    startTempo.setUTCDate(startTempo.getUTCDate() - (RECENT_TEMPO_LOOKBACK_DAYS - 1));
-    const start90 = new Date(`${today}T00:00:00Z`);
+    // Sales complete only through yesterday — windows end there, not today.
+    const salesAsOf = salesAsOfYesterdayISO(today);
+    const { isoYear: currentIsoYear, isoWeek: currentIsoWeek } = isoWeekFromDateISO(today);
+    const window30 = recentSalesWindow(RECENT_SALES_UNITS30_DAYS, salesAsOf);
+    const windowTempo = recentSalesWindow(RECENT_TEMPO_LOOKBACK_DAYS, salesAsOf);
+    const start30ISO = window30.startISO;
+    const startTempoISO = windowTempo.startISO;
+    const start90 = new Date(`${salesAsOf}T00:00:00Z`);
     start90.setUTCDate(start90.getUTCDate() - 89);
-    const historyStart = `${currentYear - 1}-01-01`;
-    const previousCompleteMonth = todayDate.getUTCMonth() - 1;
-    const comparisonAvailable = previousCompleteMonth >= 0;
-    const currentComparisonStart = `${currentYear}-01-01`;
-    const currentComparisonEnd = comparisonAvailable
-      ? isoDate(new Date(Date.UTC(currentYear, previousCompleteMonth + 1, 0)))
-      : null;
-    const previousComparisonStart = `${currentYear - 1}-01-01`;
-    const previousComparisonEnd = comparisonAvailable
-      ? isoDate(new Date(Date.UTC(currentYear - 1, previousCompleteMonth + 1, 0)))
-      : null;
+    const start90ISO = isoDate(start90);
+    // Include late Dec of year-2 so ISO week 1 of previous year is complete.
+    const historyStart = `${currentIsoYear - 2}-12-01`;
 
     const { data: inventoryData, error: inventoryError } = await sb
       .from("vw_inventory_latest_per_asin_max")
@@ -163,17 +154,30 @@ export async function GET(req: NextRequest) {
     });
 
     const leadBySku = new Map<string, number>();
+    const bufferBySku = new Map<string, number>();
+    const unitsPerCartonBySku = new Map<string, number>();
     if (inventorySkus.length) {
       const { data: leadRows } = await sb
         .from("inventory_carton_specs")
-        .select("seller_sku,production_time_days,shipping_time_days")
+        .select("seller_sku,production_time_days,shipping_time_days,buffer_time_days,units_per_carton")
         .eq("tenant_id", tenantId)
         .in("seller_sku", inventorySkus);
       for (const row of leadRows || []) {
+        const sku = String((row as { seller_sku: string }).seller_sku);
         const lead =
           Math.max(0, Number((row as { production_time_days: number | null }).production_time_days) || 0) +
           Math.max(0, Number((row as { shipping_time_days: number | null }).shipping_time_days) || 0);
-        if (lead > 0) leadBySku.set(String((row as { seller_sku: string }).seller_sku), lead);
+        if (lead > 0) leadBySku.set(sku, lead);
+        const buffer = Math.max(
+          0,
+          Math.round(Number((row as { buffer_time_days: number | null }).buffer_time_days) || 0),
+        );
+        if (buffer > 0) bufferBySku.set(sku, buffer);
+        const upc = Math.max(
+          0,
+          Math.floor(Number((row as { units_per_carton: number | null }).units_per_carton) || 0),
+        );
+        if (upc > 0) unitsPerCartonBySku.set(sku, upc);
       }
     }
 
@@ -193,7 +197,7 @@ export async function GET(req: NextRequest) {
         tenantId,
         marketplace,
         startISO: historyStart,
-        endISO: today,
+        endISO: salesAsOf,
         sellerSkus: inventorySkus,
       });
       for (const row of linked) {
@@ -208,40 +212,42 @@ export async function GET(req: NextRequest) {
     type SalesAggregate = {
       units30: number;
       units90: number;
-      currentComparable: number;
-      previousComparable: number;
-      byMonth: Map<string, number>;
       byDate30: Map<string, number>;
+      /** ISO week → units for previous ISO year (Vorjahr). */
+      previousYearWeeks: Map<number, number>;
+      /** ISO week → units for current ISO year. */
+      currentYearWeeks: Map<number, number>;
     };
     const salesBySku = new Map<string, SalesAggregate>();
-    const start30ISO = isoDate(start30);
-    const start90ISO = isoDate(start90);
     for (const sale of salesRows) {
       const sku = String(sale.seller_sku || "").trim();
       const date = String(sale.purchase_date_berlin || "").slice(0, 10);
-      if (!sku || !date) continue;
+      if (!sku || !date || date > salesAsOf) continue;
       const quantity = Math.max(0, number(sale.quantity));
       const aggregate = salesBySku.get(sku) || {
         units30: 0,
         units90: 0,
-        currentComparable: 0,
-        previousComparable: 0,
-        byMonth: new Map<string, number>(),
         byDate30: new Map<string, number>(),
+        previousYearWeeks: new Map<number, number>(),
+        currentYearWeeks: new Map<number, number>(),
       };
-      if (date >= start90ISO) aggregate.units90 += quantity;
-      if (date >= start30ISO) {
+      if (date >= start90ISO && date <= salesAsOf) aggregate.units90 += quantity;
+      if (date >= start30ISO && date <= salesAsOf) {
         aggregate.units30 += quantity;
         aggregate.byDate30.set(date, (aggregate.byDate30.get(date) || 0) + quantity);
       }
-      if (currentComparisonEnd && date >= currentComparisonStart && date <= currentComparisonEnd) {
-        aggregate.currentComparable += quantity;
+      const { isoYear, isoWeek } = isoWeekFromDateISO(date);
+      if (isoYear === currentIsoYear) {
+        aggregate.currentYearWeeks.set(
+          isoWeek,
+          (aggregate.currentYearWeeks.get(isoWeek) || 0) + quantity,
+        );
+      } else if (isoYear === currentIsoYear - 1) {
+        aggregate.previousYearWeeks.set(
+          isoWeek,
+          (aggregate.previousYearWeeks.get(isoWeek) || 0) + quantity,
+        );
       }
-      if (previousComparisonEnd && date >= previousComparisonStart && date <= previousComparisonEnd) {
-        aggregate.previousComparable += quantity;
-      }
-      const key = monthKey(date);
-      aggregate.byMonth.set(key, (aggregate.byMonth.get(key) || 0) + quantity);
       salesBySku.set(sku, aggregate);
     }
 
@@ -255,10 +261,9 @@ export async function GET(req: NextRequest) {
         const sales = salesBySku.get(sku) || {
           units30: 0,
           units90: 0,
-          currentComparable: 0,
-          previousComparable: 0,
-          byMonth: new Map<string, number>(),
           byDate30: new Map<string, number>(),
+          previousYearWeeks: new Map<number, number>(),
+          currentYearWeeks: new Map<number, number>(),
         };
         const available = Math.max(0, number(row.inventory_left));
         const inbound = Math.max(0, number(row.inbound_total));
@@ -266,68 +271,55 @@ export async function GET(req: NextRequest) {
         const localQty = local?.localQty ?? 0;
         const onOrderUnits = local?.onOrderUnits ?? 0;
         const transferLeadDays = local?.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS;
+        const amazonTargetCoverDays =
+          local?.amazonTargetCoverDays ?? DEFAULT_AMAZON_TARGET_COVER_DAYS;
         const onOrderOrderedAt = local?.onOrderOrderedAt ?? null;
         const effectiveUnits = effectiveInventoryUnits(available, inbound);
         const recentTempo = recentSalesTempoFromDaily(
-          dailyUnitsSeriesFromMap(start30ISO, today, sales.byDate30),
+          dailyUnitsSeriesFromMap(start30ISO, salesAsOf, sales.byDate30),
           RECENT_TEMPO_LOOKBACK_DAYS,
         );
         const dailySales30 = recentTempo.dailyRate;
-        // Stabilisiert kleine Vorjahresbasen, ohne Wachstum großer Listings nennenswert zu verwässern.
-        const growthFactor = calculatePositiveGrowthFactor(
-          sales.currentComparable,
-          sales.previousComparable,
+        const recent30Units = Math.max(0, Math.round(dailySales30 * recentTempo.activeDays));
+        const previousYearWeekTotals = sales.previousYearWeeks;
+        const currentYearWeekTotals = sales.currentYearWeeks;
+        const growthFactor = weeklyGrowthFactorFromMaps(
+          currentYearWeekTotals,
+          previousYearWeekTotals,
+          currentIsoWeek,
         );
         const growthPercent = Math.round((growthFactor - 1) * 1000) / 10;
+        const hasSeasonal = [...previousYearWeekTotals.values()].some((v) => v > 0);
+        const hasRecent = dailySales30 > 0;
+        const forecastMethod = hasSeasonal
+          ? hasRecent
+            ? "hybrid"
+            : "seasonal"
+          : hasRecent
+            ? "recent"
+            : "none";
 
-        const forecastDemandForDate = (forecastDate: Date) => {
-          const sourceDate = previousYearDate(forecastDate);
-          const sourceYear = sourceDate.getUTCFullYear();
-          const sourceMonth = sourceDate.getUTCMonth();
-          const sourceKey = `${sourceYear}-${String(sourceMonth + 1).padStart(2, "0")}`;
-          const seasonalUnits = sales.byMonth.get(sourceKey) || 0;
-          const canUseSeason = isCompleteMonth(sourceYear, sourceMonth, today);
-          const seasonalRate = canUseSeason && seasonalUnits > 0
-            ? seasonalUnits / daysInMonth(sourceYear, sourceMonth)
-            : 0;
-          const forecast = chooseForecastDemand({
-            seasonalDemand: seasonalRate,
-            recentDemand: dailySales30,
-            growthFactor,
-          });
-          return {
-            demand: forecast.demand,
-            seasonal: forecast.source === "seasonal",
-          };
+        const weeklyBase = {
+          currentWeek: currentIsoWeek,
+          previousYearWeekTotals,
+          currentYearWeekTotals,
+          recent30Units,
+          recentTempoDays: recentTempo.activeDays,
         };
 
-        const currentForecast = forecastDemandForDate(todayDate);
-        const demandForDayOffset = (day: number) => {
-          const forecastDate = new Date(todayDate);
-          forecastDate.setUTCDate(forecastDate.getUTCDate() + day);
-          return forecastDemandForDate(forecastDate);
-        };
+        const onHand = projectWeeklyOos({ inventory: available, ...weeklyBase });
+        const withInbound = projectWeeklyOos({ inventory: effectiveUnits, ...weeklyBase });
 
-        const onHand = projectDailyOos({
-          inventory: available,
-          todayDemand: currentForecast,
-          demandForDayOffset,
-        });
-        const withInbound = projectDailyOos({
-          inventory: effectiveUnits,
-          todayDemand: currentForecast,
-          demandForDayOffset,
-        });
-
-        const delayedLocalOnly: Array<{ dayOffset: number; units: number }> = [];
+        const transferWeeks = weeksCeilFromDays(transferLeadDays);
+        const delayedLocalOnly: Array<{ weekOffset: number; units: number }> = [];
         if (localQty > 0) {
-          delayedLocalOnly.push({ dayOffset: transferLeadDays, units: localQty });
+          delayedLocalOnly.push({ weekOffset: transferWeeks, units: localQty });
         }
 
         const delayedFullPipeline = [...delayedLocalOnly];
+        const supplierLead = leadBySku.get(sku) || 0;
         if (onOrderUnits > 0) {
-          const supplierLead = leadBySku.get(sku) || 0;
-          let onOrderDelay = Math.max(transferLeadDays, supplierLead + transferLeadDays);
+          let onOrderDelayDays = Math.max(transferLeadDays, supplierLead + transferLeadDays);
           if (onOrderOrderedAt && supplierLead > 0) {
             const ordered = Date.parse(`${onOrderOrderedAt}T12:00:00Z`);
             const todayMs = Date.parse(`${today}T12:00:00Z`);
@@ -337,35 +329,79 @@ export async function GET(req: NextRequest) {
                 Math.round((todayMs - ordered) / 86_400_000),
               );
               const remainingToLocal = Math.max(0, supplierLead - daysSinceOrder);
-              onOrderDelay = remainingToLocal + transferLeadDays;
+              onOrderDelayDays = remainingToLocal + transferLeadDays;
             }
           }
           delayedFullPipeline.push({
-            dayOffset: onOrderDelay,
+            weekOffset: weeksCeilFromDays(onOrderDelayDays),
             units: onOrderUnits,
           });
         }
 
-        const withAmazonAndLocal = projectDailyOos({
+        const withAmazonAndLocal = projectWeeklyOos({
           inventory: effectiveUnits,
-          todayDemand: currentForecast,
-          demandForDayOffset,
+          ...weeklyBase,
           delayedAdditions: delayedLocalOnly,
         });
-        const withFullPipeline = projectDailyOos({
+        const withFullPipeline = projectWeeklyOos({
           inventory: effectiveUnits,
-          todayDemand: currentForecast,
-          demandForDayOffset,
+          ...weeklyBase,
           delayedAdditions: delayedFullPipeline,
         });
 
-        const daysOfCover = withInbound.daysOfCover;
-        const daysOfCoverOnHand = onHand.daysOfCover;
-        const daysOfCoverAmazonAndLocal = withAmazonAndLocal.daysOfCover;
-        const daysOfCoverWithLocal = withFullPipeline.daysOfCover;
+        const daysOfCover = coverDaysFromWeeklyWeeks(withInbound.weeks);
+        const daysOfCoverOnHand = coverDaysFromWeeklyWeeks(onHand.weeks);
+        const daysOfCoverAmazonAndLocal = coverDaysFromWeeklyWeeks(withAmazonAndLocal.weeks);
+        const daysOfCoverWithLocal = coverDaysFromWeeklyWeeks(withFullPipeline.weeks);
         const statusCover =
           localQty > 0 || onOrderUnits > 0 ? daysOfCoverWithLocal : daysOfCover;
         const status = classifyStockStatus(available, inbound, statusCover, localQty);
+
+        const bufferDays = bufferBySku.get(sku) ?? 0;
+        const unitsPerCarton = unitsPerCartonBySku.get(sku) ?? null;
+
+        let recommendedShipQty: number | null = null;
+        if (localQty > 0 && (hasSeasonal || hasRecent)) {
+          const shipPlan = planArrivalShipmentReorder({
+            inventory: effectiveUnits,
+            currentIsoYear,
+            currentIsoWeek,
+            previousYearWeekTotals,
+            currentYearWeekTotals,
+            recent30Units,
+            recentTempoDays: recentTempo.activeDays,
+            leadTimeDays: 0,
+            bufferDays: amazonTargetCoverDays,
+          });
+          if (shipPlan && shipPlan.reorderQty > 0) {
+            const rounded = roundUpToCartons(shipPlan.reorderQty, unitsPerCarton);
+            const qty = Math.min(rounded.orderQty, localQty);
+            recommendedShipQty = qty > 0 ? qty : null;
+          }
+        }
+
+        let recommendedOrderQty: number | null = null;
+        if (supplierLead > 0 && (hasSeasonal || hasRecent)) {
+          const orderPlan = planArrivalShipmentReorder({
+            inventory: effectiveUnits,
+            currentIsoYear,
+            currentIsoWeek,
+            previousYearWeekTotals,
+            currentYearWeekTotals,
+            recent30Units,
+            recentTempoDays: recentTempo.activeDays,
+            leadTimeDays: supplierLead,
+            bufferDays,
+          });
+          if (orderPlan && orderPlan.reorderQty > 0) {
+            const afterPipeline = supplierOrderQtyAfterPipeline({
+              rawChargeQty: orderPlan.reorderQty,
+              onOrderUnits,
+            });
+            const rounded = roundUpToCartons(afterPipeline, unitsPerCarton);
+            recommendedOrderQty = rounded.orderQty > 0 ? rounded.orderQty : null;
+          }
+        }
 
         return {
           asin,
@@ -382,18 +418,21 @@ export async function GET(req: NextRequest) {
           localQty,
           onOrderUnits,
           transferLeadDays,
+          amazonTargetCoverDays,
+          bufferTimeDays: bufferBySku.get(sku) ?? null,
+          unitsPerCarton,
           onOrderOrderedAt,
           units30: sales.units30,
           units90: sales.units90,
           dailySales30: Number(dailySales30.toFixed(2)),
           recentTempoDays: recentTempo.activeDays,
           recentTempoTruncated: recentTempo.truncated,
-          forecastDailySales: Number(withInbound.forecastDailySales.toFixed(2)),
-          forecastMethod: withInbound.forecastMethod,
+          forecastDailySales: Number(dailySales30.toFixed(2)),
+          forecastMethod,
           growthFactor: Number(growthFactor.toFixed(3)),
           growthPercent,
-          comparisonCurrentUnits: sales.currentComparable,
-          comparisonPreviousUnits: sales.previousComparable,
+          comparisonCurrentUnits: ytdUnitsBeforeWeek(currentYearWeekTotals, currentIsoWeek),
+          comparisonPreviousUnits: ytdUnitsBeforeWeek(previousYearWeekTotals, currentIsoWeek),
           daysOfCover,
           estimatedOosDate: daysOfCover === null ? null : addDays(today, daysOfCover),
           daysOfCoverOnHand,
@@ -404,7 +443,9 @@ export async function GET(req: NextRequest) {
           daysOfCoverWithLocal,
           estimatedOosDateWithLocal:
             daysOfCoverWithLocal === null ? null : addDays(today, daysOfCoverWithLocal),
-          supplierLeadDays: leadBySku.get(sku) || null,
+          supplierLeadDays: supplierLead > 0 ? supplierLead : null,
+          recommendedShipQty,
+          recommendedOrderQty,
           status,
         };
       });
@@ -416,14 +457,17 @@ export async function GET(req: NextRequest) {
         marketplace,
         salesWindow: {
           days: RECENT_TEMPO_LOOKBACK_DAYS,
-          start: isoDate(startTempo),
-          end: today,
+          start: startTempoISO,
+          end: salesAsOf,
           units30Start: start30ISO,
+          units30End: salesAsOf,
+          excludesToday: true,
         },
-        seasonalHistory: { start: historyStart, end: today },
+        seasonalHistory: { start: historyStart, end: salesAsOf, engine: "weekly_ly_growth" },
         growthComparison: {
-          current: { start: currentComparisonStart, end: currentComparisonEnd },
-          previous: { start: previousComparisonStart, end: previousComparisonEnd },
+          method: "iso_week_ytd_before_current_kw",
+          currentIsoYear,
+          currentIsoWeek,
           positiveGrowthOnly: true,
           stabilizationUnits: FORECAST_GROWTH_PRIOR_UNITS,
         },

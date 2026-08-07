@@ -8,12 +8,12 @@ import {
   type ReorderTimingStatus,
 } from "./carton-specs.ts";
 import type { InventoryOverviewItem } from "./inventory-overview.ts";
+import { suggestedSupplierOrderQty } from "./inventory-overview.ts";
 import { isActiveListing } from "./listing-activity.ts";
 import {
   classifyLocalStockAction,
   DEFAULT_TRANSFER_LEAD_DAYS,
   onOrderArrivalDelayDays,
-  supplierOrderQtyAfterPipeline,
   type LocalStockAction,
 } from "./local-stock.ts";
 
@@ -37,6 +37,9 @@ export type ReorderBoardRow = {
   rawQty: number;
   orderQty: number;
   cartons: number | null;
+  /** Qty used in supplier copy text (may be gross charge when net is 0 due to open POs). */
+  messageOrderQty: number;
+  messageCartons: number | null;
   unitsPerCarton: number | null;
   rounded: boolean;
   productionDays: number | null;
@@ -83,9 +86,10 @@ export function buildReorderBoardRows(
       | "cartonHCm"
     >
   >,
-  options?: { includeInactive?: boolean; horizonDays?: number },
+  options?: { includeInactive?: boolean; horizonDays?: number; includeAllActive?: boolean },
 ): ReorderBoardRow[] {
   const horizon = options?.horizonDays ?? REORDER_BOARD_HORIZON_DAYS;
+  const includeAll = options?.includeAllActive === true;
   const rows: ReorderBoardRow[] = [];
 
   for (const item of items) {
@@ -103,7 +107,13 @@ export function buildReorderBoardRows(
         DEFAULT_TRANSFER_LEAD_DAYS,
     );
 
-    const timing = leadDays != null ? classifyReorderTiming(item.daysOfCover, leadDays) : null;
+    const timing =
+      leadDays != null
+        ? classifyReorderTiming(
+            item.daysOfCoverAmazonAndLocal ?? item.daysOfCover,
+            leadDays,
+          )
+        : null;
 
     const dailyRate =
       item.forecastDailySales > 0
@@ -128,18 +138,41 @@ export function buildReorderBoardRows(
     const cartonHCm =
       spec?.cartonHCm != null && Number(spec.cartonHCm) > 0 ? Number(spec.cartonHCm) : null;
 
+    let messageOrderQty = 0;
+    let messageCartons: number | null = null;
+
     if (leadDays != null) {
       coverDays = leadDays + bufferDays;
-      const chargeRaw = Math.max(0, Math.ceil(dailyRate * coverDays));
-      rawQty = supplierOrderQtyAfterPipeline({
-        rawChargeQty: chargeRaw,
-        onOrderUnits,
-      });
-      const roundedResult = roundUpToCartons(rawQty, unitsPerCarton);
+      const qtyItem = {
+        ...item,
+        supplierLeadDays: leadDays,
+        bufferTimeDays: bufferDays,
+        unitsPerCarton: unitsPerCarton ?? item.unitsPerCarton ?? null,
+      };
+      // Same LY+growth / tempo engine as Dashboard Nachbestellung + overview API.
+      const suggested = suggestedSupplierOrderQty(qtyItem);
+      rawQty = suggested;
+      const roundedResult = roundUpToCartons(suggested, unitsPerCarton);
       orderQty = roundedResult.orderQty;
       cartons = roundedResult.cartons;
       unitsPerCarton = roundedResult.unitsPerCarton;
       rounded = roundedResult.rounded;
+
+      // Open POs can zero the net qty (e.g. UI-JKHV-J3CU). Still offer a copyable
+      // charge so users can place an extra / early PO when they want.
+      messageOrderQty = orderQty;
+      messageCartons = cartons;
+      if (messageOrderQty <= 0) {
+        const gross = suggestedSupplierOrderQty(qtyItem, {
+          deductOpenPurchaseOrders: false,
+        });
+        if (gross > 0) {
+          const grossRounded = roundUpToCartons(gross, unitsPerCarton);
+          messageOrderQty = grossRounded.orderQty;
+          messageCartons = grossRounded.cartons;
+          unitsPerCarton = grossRounded.unitsPerCarton;
+        }
+      }
     }
 
     const action = classifyLocalStockAction({
@@ -158,13 +191,20 @@ export function buildReorderBoardRows(
       }),
     });
 
-    if (action === "order_supplier" && orderQty > 0) {
+    // Supplier text whenever we have a usable qty (net or gross charge).
+    if (
+      messageOrderQty > 0 &&
+      (action === "order_supplier" ||
+        action === "awaiting_supplier" ||
+        action === "ok" ||
+        includeAll)
+    ) {
       supplierMessage = buildSupplierOrderMessage({
         productName: item.productName,
         sku: item.sku,
         asin: item.asin,
-        orderQty,
-        cartons,
+        orderQty: messageOrderQty,
+        cartons: messageCartons,
         unitsPerCarton,
         cartonLenCm,
         cartonWCm,
@@ -191,10 +231,12 @@ export function buildReorderBoardRows(
       action === "awaiting_supplier" ||
       action === "missing_lead";
 
-    if (!dueSoon && !criticalWithoutSpec && !actionable) continue;
-    if (!missingLeadTime && orderQty <= 0 && timing?.status === "ok" && action === "ok") continue;
-    // Hide quiet "ok" rows that only appeared via dueSoon but pipeline covers them.
-    if (action === "ok" && !criticalWithoutSpec && timing?.status === "ok") continue;
+    if (!includeAll) {
+      if (!dueSoon && !criticalWithoutSpec && !actionable) continue;
+      if (!missingLeadTime && orderQty <= 0 && timing?.status === "ok" && action === "ok") continue;
+      // Hide quiet "ok" rows that only appeared via dueSoon but pipeline covers them.
+      if (action === "ok" && !criticalWithoutSpec && timing?.status === "ok") continue;
+    }
 
     let urgency = 5;
     if (missingLeadTime) urgency = 4;
@@ -202,8 +244,12 @@ export function buildReorderBoardRows(
     if (action === "order_supplier" && timing) {
       urgency = Math.min(urgency, timingUrgency[timing.status]);
     }
-    if (timing?.status === "ok" && timing.daysUntilMustOrder != null && action === "order_supplier") {
-      urgency = 3 + timing.daysUntilMustOrder / 100;
+    if (timing?.status === "ok" && timing.daysUntilMustOrder != null) {
+      // Later deadlines sort further down; still listed when includeAll.
+      urgency = Math.max(urgency, 3 + timing.daysUntilMustOrder / 100);
+    }
+    if (includeAll && action === "ok" && !dueSoon) {
+      urgency = Math.max(urgency, 8);
     }
 
     rows.push({
@@ -226,6 +272,8 @@ export function buildReorderBoardRows(
       rawQty,
       orderQty,
       cartons,
+      messageOrderQty,
+      messageCartons,
       unitsPerCarton,
       rounded,
       productionDays,

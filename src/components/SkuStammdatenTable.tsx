@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CartonSpecRow } from "@/lib/carton-specs";
 import { isActiveListing } from "@/lib/listing-activity";
-import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
+import {
+  DEFAULT_AMAZON_TARGET_COVER_DAYS,
+  DEFAULT_TRANSFER_LEAD_DAYS,
+} from "@/lib/local-stock";
 import ShowInactiveListingsToggle from "@/components/ShowInactiveListingsToggle";
 
 type Draft = {
@@ -16,6 +19,7 @@ type Draft = {
   onOrderUnits: string;
   onOrderOrderedAt: string;
   transferLeadDays: string;
+  amazonTargetCoverDays: string;
   cartonLenCm: string;
   cartonWCm: string;
   cartonHCm: string;
@@ -67,7 +71,14 @@ const COLUMN_HELP = [
   },
   {
     key: "Transfer",
-    text: "Tage vom lokalen Lager bis Amazon (Standard 7). Steuert „Amazon nachfüllen“.",
+    text: "Tage vom lokalen Lager bis Amazon (Standard 7). Steuert Wann „Amazon nachfüllen“.",
+  },
+  {
+    key: "Amz-Ziel",
+    text:
+      "Wie lange die Ware idealerweise im Amazon-Lager reichen soll (z. B. 30 oder 60 Tage). " +
+      "Daraus berechnen wir später die empfohlene Menge zum Reinschicken. " +
+      `Standard ${DEFAULT_AMAZON_TARGET_COVER_DAYS} Tage.`,
   },
   {
     key: "L / B / H",
@@ -124,6 +135,9 @@ function toDraft(row: CartonSpecRow): Draft {
           : "",
     onOrderOrderedAt: row.onOrderOrderedAt ? String(row.onOrderOrderedAt).slice(0, 10) : "",
     transferLeadDays: String(row.transferLeadDays ?? DEFAULT_TRANSFER_LEAD_DAYS),
+    amazonTargetCoverDays: String(
+      row.amazonTargetCoverDays ?? DEFAULT_AMAZON_TARGET_COVER_DAYS,
+    ),
     cartonLenCm: row.cartonLenCm != null ? String(row.cartonLenCm) : "",
     cartonWCm: row.cartonWCm != null ? String(row.cartonWCm) : "",
     cartonHCm: row.cartonHCm != null ? String(row.cartonHCm) : "",
@@ -152,10 +166,13 @@ export default function SkuStammdatenTable() {
   const [savedSku, setSavedSku] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [bulkTransfer, setBulkTransfer] = useState(String(DEFAULT_TRANSFER_LEAD_DAYS));
+  const [bulkAmazonTarget, setBulkAmazonTarget] = useState(
+    String(DEFAULT_AMAZON_TARGET_COVER_DAYS),
+  );
   const [bulkProduction, setBulkProduction] = useState("30");
   const [bulkShipping, setBulkShipping] = useState("60");
   const [bulkBuffer, setBulkBuffer] = useState("");
-  const [bulkBusy, setBulkBusy] = useState<"transfer" | "lead" | null>(null);
+  const [bulkBusy, setBulkBusy] = useState<"transfer" | "amazon_target" | "lead" | null>(null);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   const [showInactiveListings, setShowInactiveListings] = useState(false);
   const [salesBySku, setSalesBySku] = useState<
@@ -291,6 +308,10 @@ export default function SkuStammdatenTable() {
           onOrderOrderedAt: draft.onOrderOrderedAt.trim() || null,
           transferLeadDays:
             emptyToNull(draft.transferLeadDays) ?? DEFAULT_TRANSFER_LEAD_DAYS,
+          amazonTargetCoverDays: Math.max(
+            1,
+            emptyToNull(draft.amazonTargetCoverDays) ?? DEFAULT_AMAZON_TARGET_COVER_DAYS,
+          ),
           cartonLenCm: emptyToNull(draft.cartonLenCm),
           cartonWCm: emptyToNull(draft.cartonWCm),
           cartonHCm: emptyToNull(draft.cartonHCm),
@@ -314,6 +335,8 @@ export default function SkuStammdatenTable() {
                 onOrderUnits: json.item.onOrderUnits ?? row.onOrderUnits,
                 onOrderOrderedAt: json.item.onOrderOrderedAt ?? row.onOrderOrderedAt,
                 transferLeadDays: json.item.transferLeadDays ?? row.transferLeadDays,
+                amazonTargetCoverDays:
+                  json.item.amazonTargetCoverDays ?? row.amazonTargetCoverDays,
                 hasSpec: true,
               }
             : row,
@@ -327,19 +350,36 @@ export default function SkuStammdatenTable() {
     }
   }
 
-  async function applyBulk(kind: "transfer" | "lead") {
+  async function applyBulk(kind: "transfer" | "amazon_target" | "lead") {
     const payload =
       kind === "transfer"
         ? { transferLeadDays: emptyToNull(bulkTransfer) }
-        : {
-            productionTimeDays: emptyToNull(bulkProduction),
-            shippingTimeDays: emptyToNull(bulkShipping),
-            ...(emptyToNull(bulkBuffer) != null ? { bufferTimeDays: emptyToNull(bulkBuffer) } : {}),
-          };
+        : kind === "amazon_target"
+          ? {
+              amazonTargetCoverDays: Math.max(
+                1,
+                emptyToNull(bulkAmazonTarget) ?? DEFAULT_AMAZON_TARGET_COVER_DAYS,
+              ),
+            }
+          : {
+              productionTimeDays: emptyToNull(bulkProduction),
+              shippingTimeDays: emptyToNull(bulkShipping),
+              ...(emptyToNull(bulkBuffer) != null
+                ? { bufferTimeDays: emptyToNull(bulkBuffer) }
+                : {}),
+            };
 
     if (kind === "transfer") {
       if (payload.transferLeadDays == null) {
         setError("Transfer-Tage ungültig");
+        return;
+      }
+    } else if (kind === "amazon_target") {
+      if (
+        (payload as { amazonTargetCoverDays?: number }).amazonTargetCoverDays == null ||
+        (payload as { amazonTargetCoverDays: number }).amazonTargetCoverDays < 1
+      ) {
+        setError("Amazon-Zielreichweite ungültig (min. 1 Tag)");
         return;
       }
     } else if (
@@ -356,11 +396,15 @@ export default function SkuStammdatenTable() {
         ? `Transfer lokal → Amazon = ${payload.transferLeadDays} Tage für ${count} SKUs${
             showInactiveListings ? "" : " (aktive)"
           }?`
-        : `Lieferzeiten (Prod. ${
-            (payload as { productionTimeDays: number | null }).productionTimeDays ?? "–"
-          } / Versand ${
-            (payload as { shippingTimeDays: number | null }).shippingTimeDays ?? "–"
-          } Tage) für ${count} SKUs${showInactiveListings ? "" : " (aktive)"} setzen?`;
+        : kind === "amazon_target"
+          ? `Amazon-Zielreichweite = ${
+              (payload as { amazonTargetCoverDays: number }).amazonTargetCoverDays
+            } Tage für ${count} SKUs${showInactiveListings ? "" : " (aktive)"}?`
+          : `Lieferzeiten (Prod. ${
+              (payload as { productionTimeDays: number | null }).productionTimeDays ?? "–"
+            } / Versand ${
+              (payload as { shippingTimeDays: number | null }).shippingTimeDays ?? "–"
+            } Tage) für ${count} SKUs${showInactiveListings ? "" : " (aktive)"} setzen?`;
 
     if (
       !window.confirm(
@@ -388,9 +432,13 @@ export default function SkuStammdatenTable() {
       setBulkMessage(
         kind === "transfer"
           ? `Transfer ${json.applied?.transferLeadDays ?? "–"} Tage auf ${json.skus ?? 0} SKUs übernommen.`
-          : `Lieferzeiten auf ${json.skus ?? 0} SKUs übernommen (Prod. ${
-              json.applied?.productionTimeDays ?? "–"
-            } / Versand ${json.applied?.shippingTimeDays ?? "–"}).`,
+          : kind === "amazon_target"
+            ? `Amazon-Ziel ${json.applied?.amazonTargetCoverDays ?? "–"} Tage auf ${
+                json.skus ?? 0
+              } SKUs übernommen.`
+            : `Lieferzeiten auf ${json.skus ?? 0} SKUs übernommen (Prod. ${
+                json.applied?.productionTimeDays ?? "–"
+              } / Versand ${json.applied?.shippingTimeDays ?? "–"}).`,
       );
       await load();
     } catch (err: unknown) {
@@ -496,11 +544,12 @@ export default function SkuStammdatenTable() {
           )}
         </div>
 
-        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        <div className="mt-3 grid gap-3 lg:grid-cols-3">
           <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
             <div className="text-xs font-semibold text-slate-900">Transfer lokal → Amazon</div>
             <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
-              Tage vom Eigen-/3PL-Lager bis FBA (Standard bisher {DEFAULT_TRANSFER_LEAD_DAYS}).
+              Tage vom Eigen-/3PL-Lager bis FBA (Standard {DEFAULT_TRANSFER_LEAD_DAYS}). Wann
+              nachfüllen.
             </p>
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <label className="flex items-center gap-1.5 text-xs text-slate-700">
@@ -525,7 +574,37 @@ export default function SkuStammdatenTable() {
             </div>
           </div>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+          <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-3">
+            <div className="text-xs font-semibold text-slate-900">Amazon-Zielreichweite</div>
+            <p className="mt-0.5 text-[11px] leading-snug text-slate-600">
+              Wie lange die Ware im Amazon-Lager reichen soll (z.&nbsp;B. 30 oder 60 Tage). Basis für
+              die Mengenempfehlung beim Reinschicken. Standard{" "}
+              {DEFAULT_AMAZON_TARGET_COVER_DAYS}.
+            </p>
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-slate-700">
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={bulkAmazonTarget}
+                  onChange={(event) => setBulkAmazonTarget(event.target.value)}
+                  className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center text-sm tabular-nums outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+                />
+                Tage
+              </label>
+              <button
+                type="button"
+                disabled={bulkBusy != null || items.length === 0}
+                onClick={() => void applyBulk("amazon_target")}
+                className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40"
+              >
+                {bulkBusy === "amazon_target" ? "Übernehme…" : "Auf alle anwenden"}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 lg:col-span-1">
             <div className="text-xs font-semibold text-slate-900">
               China-Produktion / externe Lieferung
             </div>
@@ -621,21 +700,22 @@ export default function SkuStammdatenTable() {
         <div className="overflow-hidden rounded-2xl border border-slate-300 bg-white shadow-sm">
           <table className="w-full table-fixed border-collapse text-left text-[13px]">
             <colgroup>
-              <col className="w-[20%]" />
-              <col className="w-[6%]" />
-              <col className="w-[6%]" />
-              <col className="w-[6%]" />
-              <col className="w-[6%]" />
-              <col className="w-[6%]" />
+              <col className="w-[18%]" />
+              <col className="w-[5.5%]" />
+              <col className="w-[5.5%]" />
+              <col className="w-[5.5%]" />
+              <col className="w-[5.5%]" />
+              <col className="w-[5.5%]" />
               <col className="w-[5%]" />
               <col className="w-[5%]" />
-              <col className="w-[8%]" />
-              <col className="w-[5%]" />
-              <col className="w-[4%]" />
-              <col className="w-[4%]" />
-              <col className="w-[4%]" />
-              <col className="w-[4%]" />
               <col className="w-[7%]" />
+              <col className="w-[5%]" />
+              <col className="w-[5%]" />
+              <col className="w-[4%]" />
+              <col className="w-[4%]" />
+              <col className="w-[4%]" />
+              <col className="w-[4%]" />
+              <col className="w-[6.5%]" />
             </colgroup>
             <thead>
               <tr className="border-b border-slate-300 bg-slate-800 text-[10px] font-semibold uppercase tracking-[0.06em] text-slate-100">
@@ -676,7 +756,12 @@ export default function SkuStammdatenTable() {
                 />
                 <HeaderHint
                   label="Transfer"
-                  hint="Tage lokales Lager → Amazon (Standard 7)."
+                  hint="Tage lokales Lager → Amazon (Standard 7). Wann nachfüllen."
+                />
+                <HeaderHint
+                  label="Amz-Ziel"
+                  hint={`Gewünschte Amazon-Reichweite in Tagen (Standard ${DEFAULT_AMAZON_TARGET_COVER_DAYS}). Basis für die Mengenempfehlung beim Reinschicken.`}
+                  wide
                 />
                 <HeaderHint label="L" hint="Kartonlänge in cm." />
                 <HeaderHint label="B" hint="Kartonbreite in cm." />
@@ -810,6 +895,17 @@ export default function SkuStammdatenTable() {
                         }
                         placeholder={String(DEFAULT_TRANSFER_LEAD_DAYS)}
                         className={`${inputClass} mx-auto max-w-[4.5rem]`}
+                      />
+                    </td>
+                    <td className="px-1.5 py-2 text-center">
+                      <input
+                        value={draft.amazonTargetCoverDays}
+                        onChange={(event) =>
+                          updateDraft(item.sellerSku, "amazonTargetCoverDays", event.target.value)
+                        }
+                        placeholder={String(DEFAULT_AMAZON_TARGET_COVER_DAYS)}
+                        className={`${inputClass} mx-auto max-w-[4.5rem]`}
+                        title="Gewünschte Amazon-Reichweite (Tage)"
                       />
                     </td>
                     {(
