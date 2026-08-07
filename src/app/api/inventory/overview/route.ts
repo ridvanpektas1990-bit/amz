@@ -404,6 +404,7 @@ export async function GET(req: NextRequest) {
           daysOfCoverWithLocal,
           estimatedOosDateWithLocal:
             daysOfCoverWithLocal === null ? null : addDays(today, daysOfCoverWithLocal),
+          supplierLeadDays: leadBySku.get(sku) || null,
           status,
         };
       });

@@ -3,10 +3,13 @@
 import { useMemo } from "react";
 import InventoryOverviewTable from "@/components/InventoryOverviewTable";
 import {
-  filterItemsBySelectedSku,
+  coverActionKpisForItem,
+  coverActionKpisForItems,
+  formatCoverDaysDe,
+  formatInDaysDe,
   inventoryActionHint,
   selectOosRiskItems,
-  summarizeInventoryKpis,
+  type CoverActionKpis,
   type InventoryOverviewResponse,
   type StockStatus,
 } from "@/lib/inventory-overview";
@@ -19,10 +22,35 @@ const statusTone: Record<StockStatus, string> = {
   no_sales: "bg-slate-400",
 };
 
-function formatGrowth(value: number | null): string {
-  if (value == null) return "–";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${new Intl.NumberFormat("de-DE", { maximumFractionDigits: 0 }).format(value)} %`;
+function shipValue(kpis: CoverActionKpis, loading: boolean): { value: string; hint?: string; accent?: boolean } {
+  if (loading) return { value: "…" };
+  if (kpis.daysUntilShip != null) {
+    return {
+      value: formatInDaysDe(kpis.daysUntilShip),
+      accent: kpis.daysUntilShip <= 7,
+    };
+  }
+  if (kpis.shipUnavailableReason === "no_local") {
+    return { value: "–", hint: "kein Lokalbestand" };
+  }
+  return { value: "–", hint: "kein Absatztempo" };
+}
+
+function orderValue(kpis: CoverActionKpis, loading: boolean): { value: string; hint?: string; accent?: boolean; ok?: boolean } {
+  if (loading) return { value: "…" };
+  if (kpis.daysUntilOrder != null) {
+    return {
+      value: formatInDaysDe(kpis.daysUntilOrder),
+      accent: kpis.daysUntilOrder <= 14,
+    };
+  }
+  if (kpis.orderUnavailableReason === "already_ordered") {
+    return { value: "bereits bestellt", ok: true };
+  }
+  if (kpis.orderUnavailableReason === "no_lead") {
+    return { value: "–", hint: "Leadzeit fehlt" };
+  }
+  return { value: "–", hint: "kein Absatztempo" };
 }
 
 export function InventorySummarySection({
@@ -39,78 +67,80 @@ export function InventorySummarySection({
   onSelectSku?: (sku: string) => void;
 }) {
   const nf = useMemo(() => new Intl.NumberFormat("de-DE"), []);
-  const kpiItems = useMemo(
-    () => filterItemsBySelectedSku(data?.items ?? [], selectedSku),
-    [data?.items, selectedSku],
-  );
-  const kpis = useMemo(() => summarizeInventoryKpis(kpiItems), [kpiItems]);
+  const focusItem = useMemo(() => {
+    const sku = selectedSku?.trim();
+    if (!sku) return null;
+    return (data?.items ?? []).find((item) => item.sku === sku) || null;
+  }, [data?.items, selectedSku]);
+
+  const actionKpis = useMemo(() => {
+    if (focusItem) return coverActionKpisForItem(focusItem);
+    return coverActionKpisForItems(data?.items ?? []);
+  }, [data?.items, focusItem]);
+
   const riskItems = useMemo(
     () => selectOosRiskItems(data?.items ?? [], 12),
     [data?.items],
   );
-  const scopedAsin = selectedSku
-    ? (data?.items ?? []).find((item) => item.sku === selectedSku)?.asin || null
-    : null;
 
-  // YTD-Vergleich in der Overview-API: Jan bis letzter abgeschlossener Monat vs. Vorjahr.
-  const { previousYear, ytdMonthLabel } = useMemo(() => {
-    const now = new Date(
-      new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Europe/Berlin",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date()) + "T12:00:00Z",
-    );
-    const year = now.getUTCFullYear();
-    const lastCompleteMonthIndex = now.getUTCMonth() - 1; // 0-based; -1 im Januar
-    const monthNames = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
-    return {
-      previousYear: year - 1,
-      ytdMonthLabel:
-        lastCompleteMonthIndex >= 0 ? monthNames[lastCompleteMonthIndex] : "–",
-    };
-  }, []);
+  const ship = shipValue(actionKpis, loading);
+  const order = orderValue(actionKpis, loading);
 
   return (
     <section className="mb-4 space-y-3">
-      {scopedAsin && (
+      {focusItem && (
         <p className="text-xs text-slate-500">
-          KPIs für ASIN <span className="font-medium text-slate-700">{scopedAsin}</span>
-          {kpiItems.length > 1 ? ` (${kpiItems.length} SKUs)` : ""}
+          KPIs für SKU <span className="font-medium text-slate-700">{focusItem.sku}</span>
+          {focusItem.asin ? (
+            <>
+              {" "}
+              · ASIN <span className="font-medium text-slate-700">{focusItem.asin}</span>
+            </>
+          ) : null}
+        </p>
+      )}
+      {!focusItem && !loading && (data?.items?.length ?? 0) > 0 && (
+        <p className="text-xs text-slate-500">
+          Portfolio: kürzeste Reichweite / nächste Aktion über alle SKUs
         </p>
       )}
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {[
           {
-            label: "Verkäufe YTD",
-            value: loading ? "…" : nf.format(kpis.comparisonCurrent),
-            hint: loading ? undefined : `Jan–${ytdMonthLabel}`,
+            label: "Amazon-Reichweite",
+            value: loading ? "…" : formatCoverDaysDe(actionKpis.amazonCoverDays),
+            accent:
+              !loading &&
+              actionKpis.amazonCoverDays != null &&
+              actionKpis.amazonCoverDays <= 30,
           },
           {
-            label: "Wachstum YTD",
-            value: loading ? "…" : formatGrowth(kpis.growthPercent),
-            hint: `gegenüber ${previousYear}`,
+            label: "Gesamt-Reichweite",
+            value: loading ? "…" : formatCoverDaysDe(actionKpis.gesamtCoverDays),
+            accent:
+              !loading &&
+              actionKpis.gesamtCoverDays != null &&
+              actionKpis.gesamtCoverDays <= 30,
           },
-          { label: "Bestand verfügbar", value: loading ? "…" : nf.format(kpis.available) },
-          selectedSku
-            ? {
-                label: "Nachbestellen?",
-                value: loading ? "…" : kpis.atRisk > 0 ? "Ja" : "Nein",
-                accent: !loading && kpis.atRisk > 0,
-                ok: !loading && kpis.atRisk === 0,
-              }
-            : {
-                label: "Gefährdete Produkte",
-                value: loading ? "…" : nf.format(kpis.atRisk),
-                accent: kpis.atRisk > 0,
-              },
+          {
+            label: "Nächste Aktion Amz Lager senden",
+            value: ship.value,
+            hint: ship.hint,
+            accent: ship.accent,
+          },
+          {
+            label: "Nächste Aktion Lieferantenbestellung",
+            value: order.value,
+            hint: order.hint,
+            accent: order.accent,
+            ok: order.ok,
+          },
         ].map((card) => (
           <div
             key={card.label}
             className="rounded-2xl border border-slate-200 bg-white px-3 py-3 text-center shadow-sm"
           >
-            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
+            <div className="text-[11px] font-medium leading-snug text-slate-500">
               {card.label}
             </div>
             <div

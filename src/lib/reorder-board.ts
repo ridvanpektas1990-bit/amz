@@ -277,7 +277,7 @@ export function actionLabel(action: LocalStockAction): string {
     case "missing_lead":
       return "Stammdaten fehlen";
     case "ok":
-      return "Ok";
+      return "Abgedeckt";
     default:
       return "–";
   }

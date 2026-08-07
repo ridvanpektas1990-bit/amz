@@ -47,7 +47,7 @@ test("buildPipelineSeries marks success/error/missing per day", () => {
     dayKeys,
     runs: [
       {
-        status: "success",
+        status: "ok",
         started_at: "2026-08-06T02:12:00Z",
         finished_at: "2026-08-06T02:20:00Z",
         marketplace: "DE",
@@ -76,4 +76,18 @@ test("buildPipelineSeries marks success/error/missing per day", () => {
   const inventory = series.find((s) => s.key === "inventory")!;
   assert.equal(inventory.days["2026-08-06"].status, "success");
   assert.equal(inventory.days["2026-08-05"].status, "missing");
+});
+
+test("buildPipelineSeries falls back to order/item data presence", () => {
+  const dayKeys = ["2026-08-06", "2026-08-07"];
+  const series = buildPipelineSeries({
+    dayKeys,
+    runs: [],
+    orderDataDates: ["2026-08-07"],
+    orderItemDataDates: ["2026-08-07"],
+    inventorySnapshotDates: ["2026-08-07"],
+  });
+  assert.equal(series.find((s) => s.key === "orders")!.days["2026-08-07"].status, "success");
+  assert.equal(series.find((s) => s.key === "order_items")!.days["2026-08-07"].status, "success");
+  assert.equal(series.find((s) => s.key === "orders")!.days["2026-08-06"].status, "missing");
 });

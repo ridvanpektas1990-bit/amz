@@ -338,7 +338,7 @@ def main() -> None:
     }
     print(json.dumps(summary))
     log_etl_run(
-        "success",
+        "ok",
         f"report {start_d.isoformat()}..{end_d.isoformat()} rows={len(raw_rows)} upserted={written}",
     )
 

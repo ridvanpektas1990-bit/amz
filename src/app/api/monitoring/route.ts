@@ -39,7 +39,8 @@ export async function GET(req: NextRequest) {
     const dayKeys = lastNBerlinDays(todayISO, LOOKBACK_DAYS);
     const windowStart = `${dayKeys[0]}T00:00:00.000Z`;
 
-    const [ordersRes, itemsRes, inventoryLatestRes, inventoryDaysRes, etlRes] = await Promise.all([
+    const [ordersRes, itemsRes, inventoryLatestRes, inventoryDaysRes, etlRes, orderDaysRes, itemDaysRes] =
+      await Promise.all([
       sb
         .from("amazon_orders")
         .select("purchase_date_local")
@@ -80,6 +81,22 @@ export async function GET(req: NextRequest) {
         .gte("started_at", windowStart)
         .order("started_at", { ascending: false })
         .limit(200),
+      sb
+        .from("amazon_orders")
+        .select("purchase_date_local")
+        .eq("tenant_id", tenantId)
+        .eq("marketplace", marketplace)
+        .gte("purchase_date_local", windowStart)
+        .order("purchase_date_local", { ascending: false })
+        .limit(2000),
+      sb
+        .from("amazon_order_items")
+        .select("purchase_date_berlin")
+        .eq("tenant_id", tenantId)
+        .eq("marketplace", marketplace)
+        .gte("purchase_date_berlin", dayKeys[0])
+        .order("purchase_date_berlin", { ascending: false })
+        .limit(2000),
     ]);
 
     if (ordersRes.error) throw new Error(`Orders: ${ordersRes.error.message}`);
@@ -96,6 +113,13 @@ export async function GET(req: NextRequest) {
       throw new Error(`Inventory days: ${inventoryDaysError}`);
     }
     if (etlRes.error) throw new Error(`ETL runs: ${etlRes.error.message}`);
+    if (orderDaysRes.error) throw new Error(`Order days: ${orderDaysRes.error.message}`);
+    if (
+      itemDaysRes.error &&
+      !/amazon_order_items|schema cache|does not exist/i.test(itemDaysRes.error.message)
+    ) {
+      throw new Error(`Order item days: ${itemDaysRes.error.message}`);
+    }
 
     const maxOrderLocal = ordersRes.data?.purchase_date_local
       ? String(ordersRes.data.purchase_date_local)
@@ -119,11 +143,32 @@ export async function GET(req: NextRequest) {
       : null;
     if (latestSnap) snapshotDates.add(latestSnap);
 
+    const orderDataDates = new Set<string>();
+    for (const row of orderDaysRes.data || []) {
+      const day = berlinDateISO(row.purchase_date_local);
+      if (day) orderDataDates.add(day);
+    }
+    if (maxOrderDate) orderDataDates.add(maxOrderDate);
+
+    const orderItemDataDates = new Set<string>();
+    for (const row of itemDaysRes.data || []) {
+      const day =
+        berlinDateISO(row.purchase_date_berlin) ||
+        String(row.purchase_date_berlin || "").slice(0, 10);
+      if (day) orderItemDataDates.add(day);
+    }
+    const maxItemDate = itemsRes.data?.purchase_date_berlin
+      ? String(itemsRes.data.purchase_date_berlin).slice(0, 10)
+      : null;
+    if (maxItemDate) orderItemDataDates.add(maxItemDate);
+
     const runs = (etlRes.data || []) as EtlRunRow[];
     const pipelines = buildPipelineSeries({
       dayKeys,
       runs,
       inventorySnapshotDates: [...snapshotDates],
+      orderDataDates: [...orderDataDates],
+      orderItemDataDates: [...orderItemDataDates],
     });
 
     const freshness = buildSyncStatus({

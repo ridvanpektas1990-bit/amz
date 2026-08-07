@@ -36,14 +36,35 @@ export function useInventoryOverview(showInactiveListings = false) {
   const visibleData = useMemo(() => {
     if (!data) return null;
     const items = sortByDailySalesDesc(
-      showInactiveListings ? data.items : data.items.filter((item) => isActiveListing(item)),
+      showInactiveListings
+        ? data.items
+        : data.items.filter((item) =>
+            isActiveListing({
+              available: item.available,
+              inbound: item.inbound,
+              units30: item.units30,
+              units90: item.units90,
+              localQty: item.localQty,
+              onOrderUnits: item.onOrderUnits,
+            }),
+          ),
     );
     return { ...data, items };
   }, [data, showInactiveListings]);
 
   const hiddenCount = useMemo(() => {
     if (!data || showInactiveListings) return 0;
-    return data.items.filter((item) => !isActiveListing(item)).length;
+    return data.items.filter(
+      (item) =>
+        !isActiveListing({
+          available: item.available,
+          inbound: item.inbound,
+          units30: item.units30,
+          units90: item.units90,
+          localQty: item.localQty,
+          onOrderUnits: item.onOrderUnits,
+        }),
+    ).length;
   }, [data, showInactiveListings]);
 
   return {

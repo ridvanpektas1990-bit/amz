@@ -1,3 +1,5 @@
+import { DEFAULT_TRANSFER_LEAD_DAYS } from "./local-stock.ts";
+
 export type StockStatus = "out" | "critical" | "warning" | "healthy" | "no_sales";
 
 export type InventoryOverviewItem = {
@@ -46,6 +48,8 @@ export type InventoryOverviewItem = {
    */
   daysOfCoverWithLocal: number | null;
   estimatedOosDateWithLocal: string | null;
+  /** Supplier lead time in days (production + shipping), if configured. */
+  supplierLeadDays?: number | null;
   status: StockStatus;
 };
 
@@ -168,6 +172,132 @@ export function filterItemsBySelectedSku(
   const match = items.find((item) => item.sku === sku);
   if (!match?.asin) return items.filter((item) => item.sku === sku);
   return items.filter((item) => item.asin === match.asin);
+}
+
+export type CoverActionKpis = {
+  amazonCoverDays: number | null;
+  gesamtCoverDays: number | null;
+  /** Days until local→Amazon ship deadline; null if no local stock / no tempo. */
+  daysUntilShip: number | null;
+  shipUnavailableReason: "no_local" | "no_tempo" | null;
+  /** Days until supplier order deadline; null if open PO / no lead / no tempo. */
+  daysUntilOrder: number | null;
+  orderUnavailableReason: "already_ordered" | "no_lead" | "no_tempo" | null;
+};
+
+function minFinite(values: Array<number | null | undefined>): number | null {
+  let min: number | null = null;
+  for (const value of values) {
+    if (value == null || !Number.isFinite(value)) continue;
+    if (min == null || value < min) min = value;
+  }
+  return min;
+}
+
+/** Days left before Amazon cover drops below transfer lead (ship from local). */
+export function daysUntilAmazonShip(item: InventoryOverviewItem): number | null {
+  const localQty = Math.max(0, Number(item.localQty) || 0);
+  if (localQty <= 0) return null;
+  if (item.daysOfCover == null) return null;
+  const transfer = Math.max(0, Number(item.transferLeadDays) || DEFAULT_TRANSFER_LEAD_DAYS);
+  return Math.round(item.daysOfCover) - Math.round(transfer);
+}
+
+/** Days left before Amazon+local cover drops below supplier lead (place PO). */
+export function daysUntilSupplierOrderDeadline(item: InventoryOverviewItem): number | null {
+  if (Math.max(0, Number(item.onOrderUnits) || 0) > 0) return null;
+  const lead = Number(item.supplierLeadDays);
+  if (!Number.isFinite(lead) || lead <= 0) return null;
+  const cover = item.daysOfCoverAmazonAndLocal ?? item.daysOfCover;
+  if (cover == null) return null;
+  return Math.round(cover) - Math.round(lead);
+}
+
+export function coverActionKpisForItem(item: InventoryOverviewItem): CoverActionKpis {
+  const localQty = Math.max(0, Number(item.localQty) || 0);
+  const onOrder = Math.max(0, Number(item.onOrderUnits) || 0);
+  const lead = Number(item.supplierLeadDays);
+  const hasLead = Number.isFinite(lead) && lead > 0;
+
+  let shipUnavailableReason: CoverActionKpis["shipUnavailableReason"] = null;
+  const daysUntilShip = daysUntilAmazonShip(item);
+  if (daysUntilShip == null) {
+    shipUnavailableReason = localQty <= 0 ? "no_local" : "no_tempo";
+  }
+
+  let orderUnavailableReason: CoverActionKpis["orderUnavailableReason"] = null;
+  const daysUntilOrder = daysUntilSupplierOrderDeadline(item);
+  if (daysUntilOrder == null) {
+    if (onOrder > 0) orderUnavailableReason = "already_ordered";
+    else if (!hasLead) orderUnavailableReason = "no_lead";
+    else orderUnavailableReason = "no_tempo";
+  }
+
+  return {
+    amazonCoverDays: item.daysOfCover,
+    gesamtCoverDays: item.daysOfCoverAmazonAndLocal ?? item.daysOfCover,
+    daysUntilShip,
+    shipUnavailableReason,
+    daysUntilOrder,
+    orderUnavailableReason,
+  };
+}
+
+/** Portfolio view: shortest covers / soonest actions across items. */
+export function coverActionKpisForItems(items: InventoryOverviewItem[]): CoverActionKpis {
+  if (items.length === 1) return coverActionKpisForItem(items[0]!);
+
+  const amazonCoverDays = minFinite(items.map((item) => item.daysOfCover));
+  const gesamtCoverDays = minFinite(
+    items.map((item) => item.daysOfCoverAmazonAndLocal ?? item.daysOfCover),
+  );
+
+  const shipCandidates = items
+    .map((item) => daysUntilAmazonShip(item))
+    .filter((days): days is number => days != null);
+  const daysUntilShip = shipCandidates.length ? Math.min(...shipCandidates) : null;
+
+  const orderCandidates = items
+    .map((item) => daysUntilSupplierOrderDeadline(item))
+    .filter((days): days is number => days != null);
+  const daysUntilOrder = orderCandidates.length ? Math.min(...orderCandidates) : null;
+
+  const anyLocal = items.some((item) => Math.max(0, Number(item.localQty) || 0) > 0);
+  const anyOpenOrder = items.some((item) => Math.max(0, Number(item.onOrderUnits) || 0) > 0);
+  const anyLead = items.some((item) => {
+    const lead = Number(item.supplierLeadDays);
+    return Number.isFinite(lead) && lead > 0;
+  });
+
+  return {
+    amazonCoverDays,
+    gesamtCoverDays,
+    daysUntilShip,
+    shipUnavailableReason:
+      daysUntilShip != null ? null : anyLocal ? "no_tempo" : "no_local",
+    daysUntilOrder,
+    orderUnavailableReason:
+      daysUntilOrder != null
+        ? null
+        : anyOpenOrder
+          ? "already_ordered"
+          : anyLead
+            ? "no_tempo"
+            : "no_lead",
+  };
+}
+
+export function formatCoverDaysDe(days: number | null | undefined): string {
+  if (days == null || !Number.isFinite(days)) return "–";
+  const rounded = Math.max(0, Math.round(days));
+  return rounded === 1 ? "1 Tag" : `${rounded} Tage`;
+}
+
+export function formatInDaysDe(days: number | null | undefined): string {
+  if (days == null || !Number.isFinite(days)) return "–";
+  const rounded = Math.round(days);
+  if (rounded <= 0) return "jetzt";
+  return rounded === 1 ? "in 1 Tag" : `in ${rounded} Tagen`;
 }
 
 export function inventoryActionHint(item: InventoryOverviewItem): string {

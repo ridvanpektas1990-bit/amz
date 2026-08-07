@@ -54,6 +54,40 @@ def rest_get(path: str) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
+def log_etl_run(status: str, note: str) -> None:
+    """Write a monitoring row into etl_runs (best-effort)."""
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    today = datetime.now(LOCAL_TZ).date()
+    payload = {
+        "tenant_id": TENANT_ID,
+        "marketplace": MARKETPLACE_CODE,
+        "period_year": today.year,
+        "period_month": today.month,
+        "status": status,
+        "started_at": now,
+        "finished_at": now,
+        "run_log": f"[inventory] {note}",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}/rest/v1/etl_runs",
+        data=body,
+        method="POST",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+        print(f"# etl_runs logged status={status}")
+    except Exception as exc:  # noqa: BLE001 — monitoring must not fail the sync
+        print(f"::warning::etl_runs log failed: {exc}")
+
+
 def load_connection() -> dict[str, Any]:
     tenant = urllib.parse.quote(TENANT_ID, safe="")
     rows = rest_get(
@@ -258,11 +292,17 @@ def main() -> None:
             f"# Snapshot already exists for tenant={TENANT_ID}, "
             f"marketplace={MARKETPLACE_CODE}, date={snapshot_date}; nothing to do"
         )
+        log_etl_run("ok", f"snapshot already present for {snapshot_date}")
         return
     summaries = fetch_inventory(credentials, mp)
     rows = build_rows(summaries, columns, str(connection.get("seller_id") or ""), mp.marketplace_id)
     insert_rows(rows)
+    log_etl_run("ok", f"snapshot {snapshot_date} rows={len(rows)}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        log_etl_run("error", f"{type(exc).__name__}: {exc}")
+        raise

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   classifyStockStatus,
+  daysUntilAmazonShip,
+  daysUntilSupplierOrderDeadline,
   filterItemsBySelectedSku,
+  formatCoverDaysDe,
+  formatInDaysDe,
   inventoryActionHint,
   inventoryStatusLabel,
   selectOosRiskItems,
@@ -48,6 +52,7 @@ function item(partial: Partial<InventoryOverviewItem> & Pick<InventoryOverviewIt
       null,
     daysOfCoverWithLocal: partial.daysOfCoverWithLocal ?? partial.daysOfCover ?? null,
     estimatedOosDateWithLocal: partial.estimatedOosDateWithLocal ?? partial.estimatedOosDate ?? null,
+    supplierLeadDays: partial.supplierLeadDays ?? null,
     status: partial.status,
   };
 }
@@ -92,6 +97,42 @@ test("filterItemsBySelectedSku scopes KPIs to the ASIN of the chosen SKU", () =>
     ["A1", "A2"],
   );
   assert.equal(summarizeInventoryKpis(scoped).units30, 30);
+});
+
+test("cover action KPIs: ship and supplier deadlines from cover minus lead", () => {
+  const row = item({
+    sku: "cover",
+    status: "healthy",
+    localQty: 100,
+    transferLeadDays: 7,
+    supplierLeadDays: 40,
+    daysOfCover: 31,
+    daysOfCoverAmazonAndLocal: 75,
+  });
+  assert.equal(daysUntilAmazonShip(row), 24);
+  assert.equal(daysUntilSupplierOrderDeadline(row), 35);
+  assert.equal(formatCoverDaysDe(24), "24 Tage");
+  assert.equal(formatInDaysDe(9), "in 9 Tagen");
+  assert.equal(formatInDaysDe(0), "jetzt");
+});
+
+test("cover action KPIs skip ship without local and order with open PO", () => {
+  assert.equal(
+    daysUntilAmazonShip(item({ sku: "nolocal", status: "healthy", daysOfCover: 40, localQty: 0 })),
+    null,
+  );
+  assert.equal(
+    daysUntilSupplierOrderDeadline(
+      item({
+        sku: "po",
+        status: "healthy",
+        supplierLeadDays: 40,
+        daysOfCoverAmazonAndLocal: 80,
+        onOrderUnits: 200,
+      }),
+    ),
+    null,
+  );
 });
 
 test("action hints are actionable for OOS and short cover", () => {

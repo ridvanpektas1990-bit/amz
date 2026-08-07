@@ -85,11 +85,17 @@ export function buildPipelineSeries({
   dayKeys,
   runs,
   inventorySnapshotDates,
+  orderDataDates,
+  orderItemDataDates,
 }: {
   dayKeys: string[];
   runs: EtlRunRow[];
   /** Calendar dates that have an inventory snapshot (data presence). */
   inventorySnapshotDates?: string[];
+  /** Calendar dates that have amazon_orders rows (data presence). */
+  orderDataDates?: string[];
+  /** Calendar dates that have amazon_order_items rows (data presence). */
+  orderItemDataDates?: string[];
 }): PipelineSeries[] {
   const emptyDays = (): Record<string, PipelineDayCell> => {
     const map: Record<string, PipelineDayCell> = {};
@@ -132,6 +138,33 @@ export function buildPipelineSeries({
         runCount: 1,
         lastAt: `${day}T12:00:00.000Z`,
         detail: "Inventory-Snapshot vorhanden",
+      };
+    }
+  }
+
+  // Orders / order-items: same idea — show green when business data landed that day,
+  // even if etl_runs logging failed (e.g. status check constraint).
+  for (const day of orderDataDates || []) {
+    const key = day.slice(0, 10);
+    if (!(key in orders)) continue;
+    if (orders[key].runCount === 0) {
+      orders[key] = {
+        status: "success",
+        runCount: 1,
+        lastAt: `${key}T12:00:00.000Z`,
+        detail: "Bestelldaten für diesen Tag vorhanden",
+      };
+    }
+  }
+  for (const day of orderItemDataDates || []) {
+    const key = day.slice(0, 10);
+    if (!(key in orderItems)) continue;
+    if (orderItems[key].runCount === 0) {
+      orderItems[key] = {
+        status: "success",
+        runCount: 1,
+        lastAt: `${key}T12:00:00.000Z`,
+        detail: "Order-Items für diesen Tag vorhanden",
       };
     }
   }

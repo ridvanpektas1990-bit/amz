@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CartonSpecRow } from "@/lib/carton-specs";
+import { isActiveListing } from "@/lib/listing-activity";
 import { DEFAULT_TRANSFER_LEAD_DAYS } from "@/lib/local-stock";
+import ShowInactiveListingsToggle from "@/components/ShowInactiveListingsToggle";
 
 type Draft = {
   unitsPerCarton: string;
@@ -149,19 +151,52 @@ export default function SkuStammdatenTable() {
   const [savingSku, setSavingSku] = useState<string | null>(null);
   const [savedSku, setSavedSku] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [bulkTransfer, setBulkTransfer] = useState(String(DEFAULT_TRANSFER_LEAD_DAYS));
+  const [bulkProduction, setBulkProduction] = useState("30");
+  const [bulkShipping, setBulkShipping] = useState("60");
+  const [bulkBuffer, setBulkBuffer] = useState("");
+  const [bulkBusy, setBulkBusy] = useState<"transfer" | "lead" | null>(null);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [showInactiveListings, setShowInactiveListings] = useState(false);
+  const [salesBySku, setSalesBySku] = useState<
+    Record<string, { units30: number; units90: number }>
+  >({});
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/inventory/carton-specs", { cache: "no-store" });
-      const json = await response.json();
-      if (!response.ok || !json.ok) throw new Error(json.error || "Laden fehlgeschlagen");
+      const [specsRes, skusRes] = await Promise.all([
+        fetch("/api/inventory/carton-specs", { cache: "no-store" }),
+        fetch("/api/metrics/skus", { cache: "no-store" }),
+      ]);
+      const json = await specsRes.json();
+      if (!specsRes.ok || !json.ok) throw new Error(json.error || "Laden fehlgeschlagen");
       const rows = (json.items || []) as CartonSpecRow[];
       setItems(rows);
       const next: Record<string, Draft> = {};
       for (const row of rows) next[row.sellerSku] = toDraft(row);
       setDrafts(next);
+
+      const skusJson = await skusRes.json().catch(() => null);
+      if (skusRes.ok && skusJson?.ok && Array.isArray(skusJson.skus)) {
+        const map: Record<string, { units30: number; units90: number }> = {};
+        for (const row of skusJson.skus as Array<{
+          value?: string;
+          units30?: number;
+          units90?: number;
+        }>) {
+          const sku = String(row.value || "").trim();
+          if (!sku) continue;
+          map[sku] = {
+            units30: Math.max(0, Number(row.units30) || 0),
+            units90: Math.max(0, Number(row.units90) || 0),
+          };
+        }
+        setSalesBySku(map);
+      } else {
+        setSalesBySku({});
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -173,9 +208,44 @@ export default function SkuStammdatenTable() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("amz_show_inactive_listings") === "1") {
+        setShowInactiveListings(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  function updateShowInactiveListings(next: boolean) {
+    setShowInactiveListings(next);
+    try {
+      window.localStorage.setItem("amz_show_inactive_listings", next ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const skuIsActive = useCallback(
+    (item: CartonSpecRow) => {
+      const sales = salesBySku[item.sellerSku];
+      return isActiveListing({
+        available: item.available,
+        inbound: item.inbound,
+        localQty: item.localQty,
+        onOrderUnits: item.onOrderUnits,
+        units30: sales?.units30,
+        units90: sales?.units90,
+      });
+    },
+    [salesBySku],
+  );
+
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
     return items.filter((item) => {
+      if (!showInactiveListings && !skuIsActive(item)) return false;
       if (onlyMissing && item.hasSpec && item.productionTimeDays != null && item.shippingTimeDays != null) {
         return false;
       }
@@ -186,7 +256,7 @@ export default function SkuStammdatenTable() {
         (item.productName || "").toLowerCase().includes(term)
       );
     });
-  }, [items, search, onlyMissing]);
+  }, [items, search, onlyMissing, showInactiveListings, skuIsActive]);
 
   function updateDraft(sku: string, key: keyof Draft, value: string) {
     setDrafts((prev) => ({
@@ -257,10 +327,87 @@ export default function SkuStammdatenTable() {
     }
   }
 
+  async function applyBulk(kind: "transfer" | "lead") {
+    const payload =
+      kind === "transfer"
+        ? { transferLeadDays: emptyToNull(bulkTransfer) }
+        : {
+            productionTimeDays: emptyToNull(bulkProduction),
+            shippingTimeDays: emptyToNull(bulkShipping),
+            ...(emptyToNull(bulkBuffer) != null ? { bufferTimeDays: emptyToNull(bulkBuffer) } : {}),
+          };
+
+    if (kind === "transfer") {
+      if (payload.transferLeadDays == null) {
+        setError("Transfer-Tage ungültig");
+        return;
+      }
+    } else if (
+      (payload as { productionTimeDays: number | null }).productionTimeDays == null &&
+      (payload as { shippingTimeDays: number | null }).shippingTimeDays == null
+    ) {
+      setError("Produktions- und/oder Lieferdauer angeben");
+      return;
+    }
+
+    const count = showInactiveListings ? items.length : items.filter((item) => skuIsActive(item)).length;
+    const summary =
+      kind === "transfer"
+        ? `Transfer lokal → Amazon = ${payload.transferLeadDays} Tage für ${count} SKUs${
+            showInactiveListings ? "" : " (aktive)"
+          }?`
+        : `Lieferzeiten (Prod. ${
+            (payload as { productionTimeDays: number | null }).productionTimeDays ?? "–"
+          } / Versand ${
+            (payload as { shippingTimeDays: number | null }).shippingTimeDays ?? "–"
+          } Tage) für ${count} SKUs${showInactiveListings ? "" : " (aktive)"} setzen?`;
+
+    if (
+      !window.confirm(
+        `${summary}\n\nBestehende Werte werden überschrieben. Einzelne SKUs kannst du danach manuell anpassen.`,
+      )
+    ) {
+      return;
+    }
+
+    const sellerSkus = showInactiveListings
+      ? undefined
+      : items.filter((item) => skuIsActive(item)).map((item) => item.sellerSku);
+
+    setBulkBusy(kind);
+    setBulkMessage(null);
+    setError(null);
+    try {
+      const response = await fetch("/api/inventory/carton-specs/bulk", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...payload, sellerSkus }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json.ok) throw new Error(json.error || "Bulk-Update fehlgeschlagen");
+      setBulkMessage(
+        kind === "transfer"
+          ? `Transfer ${json.applied?.transferLeadDays ?? "–"} Tage auf ${json.skus ?? 0} SKUs übernommen.`
+          : `Lieferzeiten auf ${json.skus ?? 0} SKUs übernommen (Prod. ${
+              json.applied?.productionTimeDays ?? "–"
+            } / Versand ${json.applied?.shippingTimeDays ?? "–"}).`,
+      );
+      await load();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBulkBusy(null);
+    }
+  }
+
   const missingCount = items.filter(
-    (item) => !item.hasSpec || item.productionTimeDays == null || item.shippingTimeDays == null,
+    (item) =>
+      skuIsActive(item) &&
+      (!item.hasSpec || item.productionTimeDays == null || item.shippingTimeDays == null),
   ).length;
-  const completeCount = items.length - missingCount;
+  const activeCount = items.filter((item) => skuIsActive(item)).length;
+  const inactiveCount = items.length - activeCount;
+  const completeCount = activeCount - missingCount;
 
   return (
     <div className="mx-auto w-full max-w-[1600px] px-3 py-5 md:px-5 md:py-8">
@@ -275,6 +422,12 @@ export default function SkuStammdatenTable() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <ShowInactiveListingsToggle
+            checked={showInactiveListings}
+            onChange={updateShowInactiveListings}
+            activeCount={activeCount}
+            inactiveCount={inactiveCount}
+          />
           <div className="rounded-full bg-white px-3 py-1.5 text-xs font-medium tabular-nums text-slate-700 ring-1 ring-slate-300">
             <span className="text-emerald-700">{completeCount} komplett</span>
             <span className="mx-1.5 text-slate-300">·</span>
@@ -325,6 +478,113 @@ export default function SkuStammdatenTable() {
             </p>
           </div>
         )}
+      </div>
+
+      <div className="mb-4 rounded-2xl border border-slate-300 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-950">Universelle Vorgaben</h2>
+            <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-slate-600">
+              Einmal setzen und auf alle SKUs übernehmen. Danach kannst du einzelne Produkte in der
+              Tabelle manuell abweichend speichern.
+            </p>
+          </div>
+          {bulkMessage && (
+            <p className="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-800 ring-1 ring-emerald-200">
+              {bulkMessage}
+            </p>
+          )}
+        </div>
+
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+            <div className="text-xs font-semibold text-slate-900">Transfer lokal → Amazon</div>
+            <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
+              Tage vom Eigen-/3PL-Lager bis FBA (Standard bisher {DEFAULT_TRANSFER_LEAD_DAYS}).
+            </p>
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-slate-700">
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={bulkTransfer}
+                  onChange={(event) => setBulkTransfer(event.target.value)}
+                  className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center text-sm tabular-nums outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+                />
+                Tage
+              </label>
+              <button
+                type="button"
+                disabled={bulkBusy != null || items.length === 0}
+                onClick={() => void applyBulk("transfer")}
+                className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40"
+              >
+                {bulkBusy === "transfer" ? "Übernehme…" : "Auf alle anwenden"}
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+            <div className="text-xs font-semibold text-slate-900">
+              China-Produktion / externe Lieferung
+            </div>
+            <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
+              Produktionsdauer + Lieferdauer (= Gesamtleadzeit zum Lager). Puffer optional.
+            </p>
+            <div className="mt-2.5 flex flex-wrap items-end gap-2">
+              <label className="flex flex-col gap-0.5 text-[10px] font-medium text-slate-600">
+                Produktion
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={bulkProduction}
+                  onChange={(event) => setBulkProduction(event.target.value)}
+                  className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center text-sm tabular-nums text-slate-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5 text-[10px] font-medium text-slate-600">
+                Lieferung
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={bulkShipping}
+                  onChange={(event) => setBulkShipping(event.target.value)}
+                  className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center text-sm tabular-nums text-slate-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5 text-[10px] font-medium text-slate-600">
+                Puffer
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={bulkBuffer}
+                  onChange={(event) => setBulkBuffer(event.target.value)}
+                  placeholder="opt."
+                  className="w-20 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-center text-sm tabular-nums text-slate-900 outline-none placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={bulkBusy != null || items.length === 0}
+                onClick={() => void applyBulk("lead")}
+                className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40"
+              >
+                {bulkBusy === "lead" ? "Übernehme…" : "Auf alle anwenden"}
+              </button>
+            </div>
+            <p className="mt-1.5 text-[11px] tabular-nums text-slate-500">
+              Summe:{" "}
+              {(emptyToNull(bulkProduction) || 0) + (emptyToNull(bulkShipping) || 0)} Tage Leadzeit
+              {emptyToNull(bulkBuffer) != null
+                ? ` + ${emptyToNull(bulkBuffer)} Puffer`
+                : ""}
+            </p>
+          </div>
+        </div>
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-slate-300 bg-white p-2.5 shadow-sm">

@@ -2,11 +2,13 @@
 
 import { useMemo, useState } from "react";
 import {
-  inventoryStatusLabel,
-  type InventoryOverviewItem,
-  type InventoryOverviewResponse,
-  type StockStatus,
-} from "@/lib/inventory-overview";
+  amazonShipActionLabel,
+  coverageHealthBadgeClass,
+  coverageHealthFromOverviewItem,
+  supplierOrderActionLabel,
+} from "@/lib/coverage-health";
+import type { InventoryOverviewItem, InventoryOverviewResponse } from "@/lib/inventory-overview";
+import type { StockStatus } from "@/lib/inventory-overview";
 
 type Filter =
   | "all"
@@ -18,12 +20,12 @@ type Filter =
   | "no_sales";
 type Sort = "risk" | "cover_amazon" | "cover_gesamt" | "available" | "sales" | "asin";
 
-const statusMeta: Record<StockStatus, { label: string; badge: string; dot: string }> = {
-  out: { label: "Leer", badge: "bg-red-50 text-red-700 ring-red-200", dot: "bg-red-500" },
-  critical: { label: "≤30T", badge: "bg-orange-50 text-orange-700 ring-orange-200", dot: "bg-orange-500" },
-  warning: { label: "≤60T", badge: "bg-amber-50 text-amber-700 ring-amber-200", dot: "bg-amber-400" },
-  healthy: { label: "OK", badge: "bg-emerald-50 text-emerald-700 ring-emerald-200", dot: "bg-emerald-500" },
-  no_sales: { label: "–", badge: "bg-slate-50 text-slate-600 ring-slate-200", dot: "bg-slate-400" },
+const legacyStatusDot: Record<StockStatus, string> = {
+  out: "bg-slate-500",
+  critical: "bg-orange-500",
+  warning: "bg-amber-400",
+  healthy: "bg-emerald-500",
+  no_sales: "bg-slate-400",
 };
 
 function formatDate(value: string | null): string {
@@ -71,6 +73,7 @@ function coverBarClass(cover: number | null): string {
 }
 
 function downloadCsv(items: InventoryOverviewItem[]) {
+  const nf = new Intl.NumberFormat("de-DE");
   const header = [
     "Produkt",
     "ASIN",
@@ -81,22 +84,26 @@ function downloadCsv(items: InventoryOverviewItem[]) {
     "Lokal",
     "Bestellt",
     "Reichweite Amazon",
+    "Amz Lager senden",
     "OOS Amazon",
-    "Reichweite Insgesamt",
-    "OOS Insgesamt",
+    "Reichweite Gesamtlager",
+    "Produktbestellung",
+    "OOS Gesamtlager",
   ];
   const lines = items.map((item) => [
     item.productName || "",
     item.asin,
     item.sku,
-    statusMeta[item.status].label,
+    coverageHealthFromOverviewItem(item).shortLabel,
     item.available,
     item.inbound,
     item.localQty ?? 0,
     item.onOrderUnits ?? 0,
     amazonCover(item) ?? "",
+    amazonShipActionLabel(item),
     amazonOosDate(item) ?? "",
     gesamtCover(item) ?? "",
+    supplierOrderActionLabel(item, nf),
     gesamtOosDate(item) ?? "",
   ]);
   const csv = [header, ...lines]
@@ -122,8 +129,8 @@ function CoverCell({
 }) {
   const barWidth = cover === null ? 0 : Math.min(100, (cover / 120) * 100);
   return (
-    <div className="min-w-[88px]">
-      <div className="flex items-baseline justify-between gap-1.5">
+    <div className="mx-auto min-w-[88px] max-w-[110px]">
+      <div className="flex flex-col items-center gap-0.5">
         <span className="text-[13px] font-semibold tabular-nums text-slate-900">
           {formatCoverDays(cover, nf)}
         </span>
@@ -300,37 +307,62 @@ export default function InventoryOverviewTable({
       {!loading && !error && (
         <>
           <div className="h-[28rem] overflow-auto">
-            <table className="min-w-[900px] w-full border-collapse text-left text-[13px]">
-              <thead className="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
-                <tr className="border-b border-slate-200">
+            <table className="min-w-[1100px] w-full border-collapse text-center text-[13px]">
+              <thead className="sticky top-0 z-10">
+                <tr className="border-b border-slate-200/80 bg-white text-[10px] font-semibold tracking-wide text-slate-500">
+                  <th colSpan={5} className="px-2 py-1.5 text-left font-medium text-slate-400">
+                    Bestand
+                  </th>
+                  <th
+                    colSpan={2}
+                    className="border-l border-slate-200 bg-slate-50/90 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600"
+                  >
+                    Amazon-Lager
+                  </th>
+                  <th
+                    colSpan={2}
+                    className="border-l border-slate-200 bg-slate-100/80 px-2 py-1.5 pr-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600"
+                  >
+                    Gesamtlager
+                  </th>
+                </tr>
+                <tr className="border-b border-slate-200 bg-slate-50/90 text-[10px] uppercase tracking-wide text-slate-500">
                   <th className="px-2 py-1.5 font-semibold">Produkt</th>
                   <th className="px-1 py-1.5 font-semibold">Status</th>
-                  <th className="px-1 py-1.5 text-right font-semibold">Verf.</th>
-                  <th className="px-1 py-1.5 text-right font-semibold">In</th>
-                  <th className="px-1 py-1.5 text-right font-semibold">Lokal</th>
-                  <th className="px-1.5 py-1.5 font-semibold">Amazon</th>
-                  <th className="px-1.5 py-1.5 pr-2 font-semibold">Insgesamt</th>
+                  <th className="px-1 py-1.5 font-semibold">Verf.</th>
+                  <th className="px-1 py-1.5 font-semibold">In</th>
+                  <th className="px-1 py-1.5 font-semibold">Lokal</th>
+                  <th className="border-l border-slate-200 bg-slate-50 px-1.5 py-1.5 font-semibold text-slate-600">
+                    Reichweite
+                  </th>
+                  <th className="bg-slate-50 px-1.5 py-1.5 font-semibold text-slate-600">Senden</th>
+                  <th className="border-l border-slate-200 bg-slate-100/70 px-1.5 py-1.5 font-semibold text-slate-600">
+                    Reichweite
+                  </th>
+                  <th className="bg-slate-100/70 px-1.5 py-1.5 pr-2 font-semibold text-slate-600">
+                    Produktbestellung
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {visibleItems.map((item) => {
-                  const meta = statusMeta[item.status];
+                  const health = coverageHealthFromOverviewItem(item);
                   const active = selectedSku === item.sku;
-                  const statusText = inventoryStatusLabel(item, meta.label);
                   const amz = amazonCover(item);
                   const gesamt = gesamtCover(item);
-                  const soonOos =
-                    item.status === "out" ||
-                    item.status === "critical" ||
-                    isCoverRisk(amz) ||
-                    isCoverRisk(gesamt);
+                  const shipLabel = amazonShipActionLabel(item);
+                  const orderLabel = supplierOrderActionLabel(item, nf);
+                  const needsAttention =
+                    health.health === "sold_out" ||
+                    health.health === "stockout_risk" ||
+                    health.health === "reorder_product";
                   return (
                     <tr
                       key={`${item.asin}-${item.sku}`}
                       className={`border-b border-slate-100 ${
                         active
                           ? "bg-sky-50 shadow-[inset_0_0_0_2px_#38bdf8]"
-                          : soonOos
+                          : needsAttention
                             ? "bg-orange-50/90"
                             : ""
                       }`}
@@ -340,7 +372,7 @@ export default function InventoryOverviewTable({
                           type="button"
                           onClick={() => onSelectSku?.(item.sku)}
                           title="Produkt im Dashboard öffnen"
-                          className={`flex max-w-[280px] cursor-pointer items-center gap-2 rounded-lg px-1 py-1 text-left transition ${
+                          className={`mx-auto flex max-w-[200px] cursor-pointer items-center justify-center gap-2 rounded-lg px-1 py-1 text-center transition ${
                             active
                               ? "bg-sky-100/80 ring-1 ring-sky-300"
                               : "bg-slate-50/80 ring-1 ring-slate-200/80 hover:bg-sky-50 hover:ring-sky-200"
@@ -356,7 +388,7 @@ export default function InventoryOverviewTable({
                                 referrerPolicy="no-referrer"
                               />
                             ) : (
-                              <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
+                              <span className={`h-2 w-2 rounded-full ${legacyStatusDot[item.status]}`} />
                             )}
                           </div>
                           <span className="min-w-0">
@@ -371,27 +403,24 @@ export default function InventoryOverviewTable({
                       </td>
                       <td className="px-1 py-1.5">
                         <span
-                          className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${
-                            statusText === "Zulauf"
-                              ? "bg-sky-50 text-sky-700 ring-sky-200"
-                              : meta.badge
-                          }`}
+                          title={health.label}
+                          className={`inline-flex max-w-[9rem] rounded px-1.5 py-0.5 text-[10px] font-semibold leading-snug ring-1 ring-inset ${coverageHealthBadgeClass[health.tone]}`}
                         >
-                          {statusText}
+                          {health.shortLabel}
                         </span>
                       </td>
-                      <td className="px-1 py-1.5 text-right font-semibold tabular-nums text-slate-900">
+                      <td className="px-1 py-1.5 font-semibold tabular-nums text-slate-900">
                         {nf.format(item.available)}
                       </td>
                       <td
-                        className={`px-1 py-1.5 text-right tabular-nums ${
+                        className={`px-1 py-1.5 tabular-nums ${
                           item.inbound > 0 ? "font-semibold text-sky-700" : "text-slate-400"
                         }`}
                       >
                         {item.inbound > 0 ? `+${nf.format(item.inbound)}` : "0"}
                       </td>
                       <td
-                        className={`px-1 py-1.5 text-right tabular-nums ${
+                        className={`px-1 py-1.5 tabular-nums ${
                           (item.localQty || 0) > 0 ? "font-semibold text-violet-700" : "text-slate-400"
                         }`}
                       >
@@ -402,11 +431,41 @@ export default function InventoryOverviewTable({
                           </div>
                         ) : null}
                       </td>
-                      <td className="px-1.5 py-1.5">
+                      <td className="border-l border-slate-200 bg-slate-50/40 px-1.5 py-1.5">
                         <CoverCell cover={amz} oosDate={amazonOosDate(item)} nf={nf} />
                       </td>
-                      <td className="px-1.5 py-1.5 pr-2">
+                      <td className="bg-slate-50/40 px-1.5 py-1.5">
+                        <div
+                          title="Nächste Aktion: Amz Lager senden"
+                          className={`text-[12px] font-medium tabular-nums leading-tight ${
+                            shipLabel === "jetzt"
+                              ? "text-red-700"
+                              : shipLabel === "–"
+                                ? "text-slate-400"
+                                : "text-slate-800"
+                          }`}
+                        >
+                          {shipLabel}
+                        </div>
+                      </td>
+                      <td className="border-l border-slate-200 bg-slate-100/35 px-1.5 py-1.5">
                         <CoverCell cover={gesamt} oosDate={gesamtOosDate(item)} nf={nf} />
+                      </td>
+                      <td className="bg-slate-100/35 px-1.5 py-1.5 pr-2">
+                        <div
+                          title="Nächste Aktion: Produktbestellung"
+                          className={`mx-auto max-w-[8.5rem] text-[12px] font-medium leading-tight ${
+                            orderLabel === "jetzt"
+                              ? "text-red-700"
+                              : orderLabel.startsWith("bereits")
+                                ? "text-emerald-700"
+                                : orderLabel === "–" || orderLabel === "Leadzeit fehlt"
+                                  ? "text-slate-400"
+                                  : "text-slate-800"
+                          }`}
+                        >
+                          {orderLabel}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -418,8 +477,8 @@ export default function InventoryOverviewTable({
             )}
           </div>
           <div className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-500">
-            {visibleItems.length}/{counts.total} · Amazon = FBA (+ Zulauf) · Insgesamt = Amazon + Eigenlager
-            (Transfer)
+            {visibleItems.length}/{counts.total} · Amazon-Lager = FBA (+ Zulauf) · Gesamtlager =
+            Amazon + Eigenlager · Produktbestellung = nächste Lieferanten-PO
           </div>
         </>
       )}

@@ -36,7 +36,10 @@ import {
   supplierDeliveryGap,
   supplierOrderQtyAfterPipeline,
 } from "@/lib/local-stock";
-import { actionLabel } from "@/lib/reorder-board";
+import {
+  classifyCoverageHealth,
+  coverageHealthTextClass,
+} from "@/lib/coverage-health";
 import { sortByDailySalesDesc } from "@/lib/listing-activity";
 import Link from "next/link";
 import {
@@ -1470,10 +1473,45 @@ export default function DashboardPage() {
     return null;
   }, [onOrderUnits, deliveryGap, reorderTiming]);
 
+  const daysUntilAmazonShipAction = useMemo(() => {
+    if (localQty <= 0 || daysUntilOos == null) return null;
+    return Math.round(daysUntilOos) - Math.round(transferLeadDays);
+  }, [localQty, daysUntilOos, transferLeadDays]);
+
+  const coverageHealth = useMemo(() => {
+    if (!sku || leadTimeDays == null) return null;
+    return classifyCoverageHealth({
+      amazonAvailable: inventoryLeft ?? 0,
+      amazonInbound: 0,
+      localQty,
+      onOrderUnits,
+      amazonDaysOfCover: daysUntilOos,
+      amazonAndLocalDaysOfCover: daysUntilOosAmazonAndLocal,
+      stockAction,
+      reorderTiming,
+      deliveryGapDays: deliveryGap?.gapDays ?? null,
+      daysUntilShip: daysUntilAmazonShipAction,
+      daysUntilOrder: daysUntilSupplierOrder,
+    });
+  }, [
+    sku,
+    leadTimeDays,
+    inventoryLeft,
+    localQty,
+    onOrderUnits,
+    daysUntilOos,
+    daysUntilOosAmazonAndLocal,
+    stockAction,
+    reorderTiming,
+    deliveryGap?.gapDays,
+    daysUntilAmazonShipAction,
+    daysUntilSupplierOrder,
+  ]);
+
   const eigenesLagerLabel = (() => {
     if (localQty <= 0) return "Leer";
     if (daysUntilOos == null) return "nicht nötig";
-    const daysLeft = Math.round(daysUntilOos) - Math.round(transferLeadDays);
+    const daysLeft = daysUntilAmazonShipAction ?? 0;
     if (daysLeft <= 0) return "Amazon nachfüllen";
     return `${inDaysLabel(daysLeft)} schicken`;
   })();
@@ -1596,19 +1634,22 @@ export default function DashboardPage() {
               <div className="mt-1">
                 <div
                   className={`text-lg font-semibold ${
-                    stockAction === "order_supplier" &&
-                    (reorderTiming.status === "already_oos" || reorderTiming.status === "too_late")
-                      ? "text-red-700"
-                      : stockAction === "order_supplier"
-                        ? "text-amber-800"
-                        : stockAction === "replenish_amazon"
-                          ? "text-sky-800"
-                          : stockAction === "awaiting_supplier"
-                            ? "text-violet-800"
-                            : "text-slate-950"
+                    coverageHealth
+                      ? coverageHealthTextClass[coverageHealth.tone]
+                      : stockAction === "order_supplier" &&
+                          (reorderTiming.status === "already_oos" ||
+                            reorderTiming.status === "too_late")
+                        ? "text-red-700"
+                        : stockAction === "order_supplier"
+                          ? "text-amber-800"
+                          : stockAction === "replenish_amazon"
+                            ? "text-sky-800"
+                            : stockAction === "awaiting_supplier"
+                              ? "text-violet-800"
+                              : "text-slate-950"
                   }`}
                 >
-                  {actionLabel(stockAction)}
+                  {coverageHealth?.label ?? "–"}
                 </div>
                 {stockAction === "replenish_amazon" && (
                   <p className="mt-1 text-sm leading-relaxed text-slate-600">
@@ -1642,7 +1683,9 @@ export default function DashboardPage() {
                 )}
                 {stockAction === "ok" && (
                   <p className="mt-1 text-sm leading-relaxed text-slate-600">
-                    Pipeline reicht voraussichtlich über die Lieferzeit.
+                    {daysUntilOos != null && daysUntilOos <= 30
+                      ? `Amazon-Reichweite nur ca. ${nfTop.format(daysUntilOos)} Tage – trotzdem abgedeckt, weil Eigenlager/Lieferant die nächste Aktion rechtzeitig ermöglichen.`
+                      : "Pipeline reicht voraussichtlich über die Lieferzeit."}
                   </p>
                 )}
               </div>

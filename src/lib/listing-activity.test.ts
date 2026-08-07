@@ -16,6 +16,17 @@ test("inactive when OOS for a long time with no sales and no inbound", () => {
   assert.equal(isActiveListing({ available: 0, inbound: 0, units90: 0, units30: 0 }), false);
 });
 
+test("active when local warehouse or open PO exists", () => {
+  assert.equal(
+    isActiveListing({ available: 0, inbound: 0, units90: 0, localQty: 10 }),
+    true,
+  );
+  assert.equal(
+    isActiveListing({ available: 0, inbound: 0, units90: 0, onOrderUnits: 50 }),
+    true,
+  );
+});
+
 test("sorts by daily sales descending", () => {
   const sorted = sortByDailySalesDesc([
     { label: "slow", units30: 30 },
